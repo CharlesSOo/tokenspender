@@ -23,6 +23,16 @@ Reads the credentials your CLIs already have (Claude Code, Codex CLI, Pi for Kim
 
 The menu-bar number is an estimate across accounts, not a shared token balance. Per-account bars and reset times are in the popover. The animation reacts to session-log activity, not measured token spend.
 
+## Design
+
+A single percentage in the menu bar, a little guy who eats and dances while you work. Light and dark follow the system.
+
+![Menu-bar percentage](docs/menubar.png)
+
+| Eating | Dancing |
+|---|---|
+| ![Eating animation](docs/animation.gif) | ![Dancing animation](docs/dancing.gif) |
+
 ## Footprint
 
 Pure AppKit. ~450 KiB bundle, ~20 MiB settled memory, 0% idle CPU.
