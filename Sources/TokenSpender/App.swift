@@ -305,25 +305,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Documentation assets are rendered from demo data, never captured from the desktop.
         let url = URL(fileURLWithPath: dir)
-        var frames: [CGImage] = []
-        for critter in CritterAnimation.eating.frames {
-            let image = NSImage(size: NSSize(width: 86, height: 24))
-            image.lockFocus()
-            hexColor(0xFAF9F5).setFill()
-            NSRect(x: 0, y: 0, width: 86, height: 24).fill()
-            critter.draw(in: NSRect(x: 6, y: 4, width: 22, height: 16))
-            NSAttributedString(string: "59%", attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), .foregroundColor: NSColor.black]).draw(at: NSPoint(x: 34, y: 5))
-            image.unlockFocus()
-            if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) { frames.append(cg) }
-        }
-        if let first = frames.first {
-            let rep = NSBitmapImageRep(cgImage: first)
-            try? rep.representation(using: .png, properties: [:])?.write(to: url.appendingPathComponent("menubar.png"))
-        }
-        if let gif = CGImageDestinationCreateWithURL(url.appendingPathComponent("animation.gif") as CFURL, "com.compuserve.gif" as CFString, frames.count, nil) {
-            CGImageDestinationSetProperties(gif, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
-            for frame in frames { CGImageDestinationAddImage(gif, frame, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 0.5]] as CFDictionary) }
-            CGImageDestinationFinalize(gif)
+        for (mode, filename) in [(CritterAnimation.eating, "animation.gif"), (.legsArms, "dancing.gif")] {
+            var frames: [CGImage] = []
+            for critter in mode.frames {
+                let image = NSImage(size: NSSize(width: 86, height: 24))
+                image.lockFocus()
+                hexColor(0xFAF9F5).setFill()
+                NSRect(x: 0, y: 0, width: 86, height: 24).fill()
+                critter.draw(in: NSRect(x: 6, y: 4, width: 22, height: 16))
+                NSAttributedString(string: "59%", attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), .foregroundColor: NSColor.black]).draw(at: NSPoint(x: 34, y: 5))
+                image.unlockFocus()
+                if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) { frames.append(cg) }
+            }
+            if mode == .eating, let first = frames.first {
+                let rep = NSBitmapImageRep(cgImage: first)
+                try? rep.representation(using: .png, properties: [:])?.write(to: url.appendingPathComponent("menubar.png"))
+            }
+            if let gif = CGImageDestinationCreateWithURL(url.appendingPathComponent(filename) as CFURL, "com.compuserve.gif" as CFString, frames.count, nil) {
+                CGImageDestinationSetProperties(gif, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
+                for frame in frames { CGImageDestinationAddImage(gif, frame, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 0.5]] as CFDictionary) }
+                CGImageDestinationFinalize(gif)
+            }
         }
         exit(0)
     }

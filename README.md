@@ -9,7 +9,9 @@ A small native macOS menu-bar monitor for Claude, Codex and Kimi quota remaining
 
 ![Menu-bar percentage](docs/menubar.png)
 
-![Pixel character animation](docs/animation.gif)
+| Eating | Dancing |
+|---|---|
+| ![Eating animation](docs/animation.gif) | ![Dancing animation](docs/dancing.gif) |
 
 ## Install
 
