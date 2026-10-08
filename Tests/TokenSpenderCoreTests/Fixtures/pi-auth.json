@@ -1,0 +1,6 @@
+{
+  "kimi-coding": {"type": "oauth", "access": "fake-kimi-access", "refresh": "fake-kimi-refresh", "expires": 4102444800000},
+  "openai": {"type": "oauth", "access": "fake-openai-access", "refresh": "fake-openai-refresh", "expires": 946684800000,
+             "clientId": "oaiapp_fake", "scopes": ["chatgpt.tokens.use.direct"]},
+  "vercel-ai-gateway": {"type": "api_key", "key": "fake-key"}
+}

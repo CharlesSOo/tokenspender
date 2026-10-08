@@ -1,0 +1,11 @@
+[
+  {
+    "error" : {
+      "code" : 1,
+      "kind" : "provider",
+      "message" : "Codex connection failed: failed to fetch codex rate limits: GET https:\/\/chatgpt.com\/backend-api\/wham\/usage failed: 401 Unauthorized; content-type=text\/plain; body={\n  \"error\": {\n    \"message\": \"Provided authentication token is expired. Please try signing in again.\",\n    \"type\": \"invalid_request_error\",\n    \"code\": \"token_expired\",\n    \"param\": null\n  },\n  \"status\": 401,\n  \"detail\": {\n    \"code\": \"token_expired\",\n    \"message\": \"Provided authentication token is expired. Please try signing in again.\"\n  }\n}"
+    },
+    "provider" : "codex",
+    "source" : "auto"
+  }
+]

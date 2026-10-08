@@ -1,0 +1,79 @@
+{
+ "schemaVersion": 1,
+ "activeAccountNumber": 1,
+ "accounts": [
+  {
+   "number": 1,
+   "email": "you@example.com",
+   "organizationName": "you@example.com's Organization",
+   "organizationUuid": "00000000-0000-0000-0000-000000000000",
+   "isOrganization": true,
+   "active": true,
+   "usageStatus": "ok",
+   "usage": {
+    "fiveHour": {
+     "pct": 3.0,
+     "resetsAt": "2026-10-08T14:09:59.615064+00:00",
+     "countdown": "4h 31m",
+     "clock": "21:09"
+    },
+    "sevenDay": {
+     "pct": 0.0,
+     "resetsAt": "2026-10-15T07:59:59.615084+00:00",
+     "countdown": "6d 22h",
+     "clock": "Oct 15 14:59"
+    },
+    "scoped": [
+     {
+      "pct": 0.0,
+      "resetsAt": "2026-10-15T08:00:00+00:00",
+      "countdown": "6d 22h",
+      "clock": "Oct 15 15:00",
+      "name": "Fable"
+     }
+    ]
+   },
+   "usageFetchedAt": "2026-10-08T09:38:41Z",
+   "usageAgeSeconds": 0.0
+  },
+  {
+   "number": 2,
+   "email": "work@example.com",
+   "organizationName": "work@example.com's Organization",
+   "organizationUuid": "00000000-0000-0000-0000-000000000000",
+   "isOrganization": true,
+   "active": false,
+   "usageStatus": "ok",
+   "usage": {
+    "fiveHour": {
+     "pct": 0.0
+    },
+    "sevenDay": {
+     "pct": 84.0,
+     "resetsAt": "2026-10-08T16:59:59.994611+00:00",
+     "countdown": "7h 21m",
+     "clock": "23:59",
+     "expectedPct": 95.6,
+     "aheadOfPace": false,
+     "projectedExhaustionAt": "2026-10-09T16:14:37Z",
+     "willLastToReset": true
+    },
+    "scoped": [
+     {
+      "pct": 32.0,
+      "resetsAt": "2026-10-08T16:59:59.994823+00:00",
+      "countdown": "7h 21m",
+      "clock": "23:59",
+      "expectedPct": 95.6,
+      "aheadOfPace": false,
+      "projectedExhaustionAt": "2026-10-22T15:00:53Z",
+      "willLastToReset": true,
+      "name": "Fable"
+     }
+    ]
+   },
+   "usageFetchedAt": "2026-10-08T09:38:41Z",
+   "usageAgeSeconds": 0.0
+  }
+ ]
+}
