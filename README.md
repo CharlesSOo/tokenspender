@@ -51,7 +51,7 @@ System appearance controls light/dark mode. Animation settings: Off, Eating (def
 
 ## Resource measurements
 
-One Apple Silicon release build, short refresh/open-close test; not a long-duration leak guarantee:
+Current bundle: **456 KiB**. The table below records the earlier AppKit release (`14eb71e`), before native Claude support and pinned selection: a short Apple Silicon refresh/open-close test, not a long-duration leak guarantee.
 
 | Measurement | Observed |
 |---|---:|
@@ -61,6 +61,8 @@ One Apple Silicon release build, short refresh/open-close test; not a long-durat
 | Resident memory (RSS), sampled peak | ~69.7 MiB |
 | Idle CPU | 0.0% |
 | Separate claude-swap helper footprint | ~23.8 MiB during refresh |
+
+The newer native/pinned build sampled **16.1 MiB footprint / 50.1 MiB RSS after launch**, with no popover/refresh stress comparison. This is not evidence of a memory reduction. A separate optimization experiment regressed animated workloads and was rejected; the 50% reduction target was not achieved.
 
 RSS and physical footprint are different metrics. Helper memory is additional; total refresh memory is **not** under 30 MiB. Pure AppKit; no SwiftUI runtime.
 
