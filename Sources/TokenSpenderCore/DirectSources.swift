@@ -45,15 +45,23 @@ public enum DirectSources {
             let type: String
             let access: String?
             let expires: Double?
+
+            private enum CodingKeys: String, CodingKey { case type, access, expires }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                type = try c.decode(String.self, forKey: .type)
+                guard type == "oauth" else { access = nil; expires = nil; return }
+                access = try c.decode(String.self, forKey: .access)
+                expires = c.contains(.expires) ? try c.decode(Double.self, forKey: .expires) : nil
+            }
         }
-        let entries: [String: Entry]
+        let entries: [String: LenientEntry]
         init(from decoder: Decoder) throws {
-            // Tolerate non-OAuth entries (e.g. api_key) by decoding leniently per key.
+            // Preserve malformed target presence while tolerating unrelated malformed providers.
             let c = try decoder.singleValueContainer()
-            let raw = try c.decode([String: LenientEntry].self)
-            entries = raw.compactMapValues(\.entry)
+            entries = try c.decode([String: LenientEntry].self)
         }
-        private struct LenientEntry: Decodable {
+        struct LenientEntry: Decodable {
             let entry: Entry?
             init(from decoder: Decoder) throws { entry = try? Entry(from: decoder) }
         }
@@ -62,7 +70,10 @@ public enum DirectSources {
     /// Pi `auth.json`: `{ "<key>": { type: "oauth", access, refresh, expires(ms epoch) } }`.
     static func piCredential(_ key: String, authJSON: Data, now: Date = Date()) -> Result<Credential, CredentialError> {
         guard let auth = try? JSONDecoder().decode(PiAuth.self, from: authJSON) else { return .failure(.unreadable) }
-        guard let e = auth.entries[key], e.type == "oauth", let access = e.access, !access.isEmpty else { return .failure(.missing) }
+        guard let target = auth.entries[key] else { return .failure(.missing) }
+        guard let e = target.entry else { return .failure(.unreadable) }
+        guard e.type == "oauth" else { return .failure(.missing) }
+        guard let access = e.access, !access.isEmpty else { return .failure(.unreadable) }
         let expires = e.expires.map { Date(timeIntervalSince1970: $0 / 1000) }
         if let expires, expires <= now { return .failure(.expired) }
         return .success(Credential(access: access, expires: expires))
@@ -74,12 +85,18 @@ public enum DirectSources {
             let account_id: String?
         }
         let tokens: Tokens?
+        private enum CodingKeys: String, CodingKey { case tokens }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            tokens = c.contains(.tokens) ? try c.decode(Tokens.self, forKey: .tokens) : nil
+        }
     }
 
     /// Codex CLI `auth.json`: `{ tokens: { access_token, account_id, ... } }`; expiry from the JWT `exp` claim.
     static func codexCredential(authJSON: Data, now: Date = Date()) -> Result<Credential, CredentialError> {
         guard let auth = try? JSONDecoder().decode(CodexAuth.self, from: authJSON) else { return .failure(.unreadable) }
-        guard let t = auth.tokens, !t.access_token.isEmpty else { return .failure(.missing) }
+        guard let t = auth.tokens else { return .failure(.missing) }
+        guard !t.access_token.isEmpty else { return .failure(.unreadable) }
         let claims = jwtClaims(t.access_token)
         let expires = (claims?["exp"] as? Double).map { Date(timeIntervalSince1970: $0) }
         if let expires, expires <= now { return .failure(.expired) }
