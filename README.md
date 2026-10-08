@@ -15,7 +15,7 @@ A small native macOS menu-bar monitor for Claude, Codex and Kimi quota remaining
 
 ## Install
 
-Requires macOS 14+, Swift 5.9+ and Xcode Command Line Tools. No Swift package dependencies.
+Requires macOS 14+ and Xcode Command Line Tools. No package dependencies.
 
 ```sh
 git clone https://github.com/CharlesSOo/tokenspender.git
@@ -23,49 +23,32 @@ cd tokenspender
 ./install.sh
 ```
 
-Builds for your Mac, ad-hoc signs, installs to `~/Applications/tokenspender.app`, and opens it. The app registers for launch at login; manage this in System Settings → General → Login Items. This is a source build, not a notarized download.
+Builds, ad-hoc signs, installs to `~/Applications/tokenspender.app`, opens it and registers it as a login item. Source build, not notarized.
 
 ## Accounts
 
-- **Claude, one account:** sign in normally in Claude Code. No cswap install or extra login is needed. tokenspender reads that profile's existing OAuth credentials and verifies the account with Anthropic before fetching quota. If the row says **authorize in Settings**, choose **Settings → Authorize Claude Code access…** and approve macOS's Keychain request. Background polling and ordinary Refresh never prompt. If expired, open Claude Code and sign in there, then Refresh.
-- **Claude, managed accounts (optional):** install [claude-swap](https://github.com/realiti4/claude-swap), save accounts with `cswap add`, and ensure `cswap list --json` works. Configured managed accounts take precedence; the native current account is not added again. claude-swap manages and may refresh its own credentials. A managed-source error stays visible rather than silently switching to the native login. See [integration notes](docs/account-selection.md) for profile paths and consent.
-- **Codex:** sign in through Codex CLI. Reads `~/.codex/auth.json`; a Pi OpenAI login is not interchangeable with this ChatGPT usage credential.
-- **Kimi:** sign in to `kimi-coding` in Pi. Reads `~/.pi/agent/auth.json`. Missing credentials hide the provider; expired or unreadable configured credentials show an error.
+- **Claude:** sign in normally in Claude Code. If the row says **authorize in Settings**, choose **Settings → Authorize Claude Code access…** and approve the Keychain prompt once. Expired? Sign in again in Claude Code, then Refresh.
+- **Claude, multiple accounts (optional):** install [claude-swap](https://github.com/realiti4/claude-swap) and save accounts with `cswap add`. See [integration notes](docs/account-selection.md).
+- **Codex:** sign in through Codex CLI (`~/.codex/auth.json`).
+- **Kimi:** sign in to `kimi-coding` in Pi (`~/.pi/agent/auth.json`).
 
-Direct Claude/Codex/Kimi credentials are read-only: renew expired logins in their owning tool. Native Claude credentials stay in memory only; tokenspender never saves or refreshes them. Usage requests go directly to the providers; there is no tokenspender backend or telemetry. CodexBar is not required.
+Credentials are read-only; renew expired logins in their owning tool. Requests go directly to the providers. No backend, no telemetry.
 
 ## Display
 
-- **Available now:** estimated mean of each available account's limiting remaining percentage.
+The menu-bar number is one of:
+
+- **Available now:** mean of each account's limiting remaining percentage.
 - **Lowest account:** the lowest remaining quota.
-- **Claude pool / Codex pool:** the corresponding provider's estimated remaining percentage.
-- **Claude: account — pinned:** Settings lists individual Claude accounts beneath the pools. Pins the menu-bar percentage to that account's limiting window (including weekly exhaustion), without hiding any accounts in the popover or switching Claude Code's login. Selection persists across relaunches and follows stable account identity through label/slot changes. A missing or unverifiable selected account shows **—**, never another account.
+- **Claude pool / Codex pool:** one provider's estimate.
+- **Pinned Claude account:** one account's limiting window.
 
-A single Claude account still offers explicit pool versus pinned selection: the pool follows future membership; the pin does not. No redundant individual Codex choice is added. Native Claude identity is verified through the token-authenticated profile API. Managed identity is joined read-only from cswap's `~/.claude-swap-backup/sequence.json`; inconsistent identity metadata disables individual selection, while successfully fetched managed pool usage remains available. Existing four modes remain; the new selection setting starts at Available now.
+These aggregates are estimates, not a shared token balance: accounts are weighted equally and a weekly limit can bind even when the five-hour window has room. Exact per-account bars and both reset times stay visible in the popover.
 
-**These aggregates are estimates, not a shared token balance.** Providers do not expose comparable token capacities; accounts are weighted equally, not by invented plan multipliers. A weekly limit can constrain an account even when its five-hour window has room. Exact per-account bars remain visible.
+Animation (Off, Eating, Legs, Legs + arms, Legs + arms + eating) reacts to session-log file activity, a proxy for work rather than measured token spend.
 
-Both window reset times appear below the bars. Consumption ETA needs at least 15 minutes of fresh declining observations and restarts after relaunch/reset; it is an estimate, not a guarantee.
+## Development
 
-System appearance controls light/dark mode. Animation settings: Off, Eating (default), Legs, Legs + arms, or Legs + arms + eating. Animation responds to session-log filesystem activity, **a proxy for work—not verified token spending**. Off stops the watcher. No token-total scanning.
+Pure AppKit, ~450 KiB bundle, ~20 MiB settled footprint. `swift test` runs the tests. Regenerate demo images with `TOKENSPENDER_DEMO=1 TOKENSPENDER_SNAPSHOT_DIR="$PWD/docs" .build/release/TokenSpender` after a release build.
 
-## Resource measurements
-
-Current bundle: **456 KiB**. The table below records the earlier AppKit release (`14eb71e`), before native Claude support and pinned selection: a short Apple Silicon refresh/open-close test, not a long-duration leak guarantee.
-
-| Measurement | Observed |
-|---|---:|
-| App bundle | 384 KiB |
-| Physical footprint, settled | 20.4–20.8 MiB |
-| Physical footprint, observed peak | 22.9 MiB |
-| Resident memory (RSS), sampled peak | ~69.7 MiB |
-| Idle CPU | 0.0% |
-| Separate claude-swap helper footprint | ~23.8 MiB during refresh |
-
-The newer native/pinned build sampled **16.1 MiB footprint / 50.1 MiB RSS after launch**, with no popover/refresh stress comparison. This is not evidence of a memory reduction. A separate optimization experiment regressed animated workloads and was rejected; the 50% reduction target was not achieved.
-
-RSS and physical footprint are different metrics. Helper memory is additional; total refresh memory is **not** under 30 MiB. Pure AppKit; no SwiftUI runtime.
-
-Run tests with `swift test`. Regenerate privacy-safe demo images with `TOKENSPENDER_DEMO=1 TOKENSPENDER_SNAPSHOT_DIR="$PWD/docs" .build/release/TokenSpender` after a release build.
-
-MIT licensed. Provider parsing includes code adapted from [CodexBar](https://github.com/steipete/CodexBar); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Independent project, not affiliated with Anthropic, OpenAI or Moonshot AI.
+MIT licensed. Provider parsing includes code adapted from [CodexBar](https://github.com/steipete/CodexBar); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Not affiliated with Anthropic, OpenAI or Moonshot AI.
