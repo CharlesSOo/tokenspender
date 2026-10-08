@@ -3,9 +3,9 @@ import Darwin
 
 /// Direct providers are read-only. cswap owns Claude credentials and may refresh them itself.
 public enum Fetcher {
-    public static func fetchAll() async -> UsageSnapshot {
+    public static func fetchAll(authorizeClaude: Bool = false) async -> UsageSnapshot {
         async let codex = DirectSources.codex()
-        async let claude = claudeAccounts()
+        async let claude = claudeAccounts(authorizeNative: authorizeClaude)
         async let kimi = DirectSources.kimi()
         return UsageSnapshot(codex: hideIfMissing(await codex), claude: await claude, kimi: hideIfMissing(await kimi))
     }
@@ -14,17 +14,39 @@ public enum Fetcher {
         row.error == "not logged in" ? .notConfigured : row
     }
 
-    static func claudeAccounts() async -> [ClaudeAccount] {
-        guard let out = await run(NSHomeDirectory() + "/.local/bin/cswap", ["list", "--json"]),
-              let accounts = autoreleasepool(invoking: {
-                  // macOS cswap stores identity metadata here (paths.py / sequence.json).
-                  // Read only metadata, never backup credentials; inconsistent joins fail closed.
-                  let metadata = try? Data(contentsOf: URL(fileURLWithPath: NSHomeDirectory() + "/.claude-swap-backup/sequence.json"))
-                  return Parse.cswap(out, metadata: metadata)
-              }) else {
-            return [ClaudeAccount(slot: 0, email: "Accounts unavailable", usage: .failure("unavailable"))]
+    /// Missing/empty managed metadata means native Claude, regardless of whether cswap is installed.
+    /// Present but unreadable metadata or any managed fetch failure must never select a different login.
+    static func claudeAccounts(metadata: Result<Data, DirectSources.CredentialError>,
+                               managed: () async -> Data?, native: () async -> [ClaudeAccount]) async -> [ClaudeAccount] {
+        struct Sequence: Decodable { let accounts: [String: Entry] }
+        struct Entry: Decodable { let email: String }
+        let data: Data
+        switch metadata {
+        case .failure(.missing): return await native()
+        case .failure: return claudeFailure("cswap metadata unreadable")
+        case .success(let value): data = value
+        }
+        guard let sequence = try? JSONDecoder().decode(Sequence.self, from: data) else {
+            return claudeFailure("cswap metadata unreadable")
+        }
+        if sequence.accounts.isEmpty { return await native() }
+        guard let output = await managed(), let accounts = Parse.cswap(output, metadata: data), !accounts.isEmpty else {
+            return claudeFailure("cswap unavailable")
         }
         return accounts
+    }
+
+    private static func claudeFailure(_ message: String) -> [ClaudeAccount] {
+        [ClaudeAccount(slot: 0, email: "Managed Claude accounts", usage: .failure(message))]
+    }
+
+    static func claudeAccounts(authorizeNative: Bool = false) async -> [ClaudeAccount] {
+        let path = NSHomeDirectory() + "/.claude-swap-backup/sequence.json"
+        return await claudeAccounts(metadata: DirectSources.readFile(path), managed: {
+            await run(NSHomeDirectory() + "/.local/bin/cswap", ["list", "--json"])
+        }, native: {
+            await NativeClaude.fetch(authorize: authorizeNative)
+        })
     }
 
     /// Off-main, bounded output and wall time. Spawn into a separate process group so descendants

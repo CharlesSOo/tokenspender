@@ -20,6 +20,8 @@ public struct RowUsage: Equatable, Sendable {
     /// Source observation time, not the time a cached response was read.
     public var observedAt: Date?
     public var identity: String?
+    /// Native Claude Keychain needs an explicit user-initiated authorization/retry.
+    public var needsClaudeAuthorization = false
 
     /// The window with the least left.
     public var constraining: UsageWindow? { windows.min { $0.percentLeft < $1.percentLeft } }
@@ -35,12 +37,12 @@ public struct RowUsage: Equatable, Sendable {
     public static let notConfigured = RowUsage(error: "not configured", isConfigured: false)
 }
 
-/// One cswap slot. Rows are ordered by `slot`; `email` is the display name.
+/// One managed or native Claude account. `slot` orders managed rows; `email` is only a display name.
 public struct ClaudeAccount: Equatable, Sendable {
     public let slot: Int
     public let email: String
     public var usage: RowUsage
-    /// Account UUID + organization UUID from cswap metadata; nil when identity cannot be verified.
+    /// Account UUID + organization UUID from cswap metadata or native OAuth profile; nil if unverified.
     public let id: String?
 
     public init(slot: Int, email: String, usage: RowUsage, id: String? = nil) {
@@ -51,7 +53,7 @@ public struct ClaudeAccount: Equatable, Sendable {
     }
 }
 
-/// One fetch of every provider. Claude accounts come from cswap and may be empty.
+/// One fetch of every provider. Claude comes from managed cswap accounts or one native login, never both.
 public struct UsageSnapshot: Equatable, Sendable {
     public var codex: RowUsage
     public var claude: [ClaudeAccount]

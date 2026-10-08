@@ -1,6 +1,6 @@
 # Third-party notices
 
-Provider usage parsing in `Sources/TokenSpenderCore/DirectSources.swift`, including the Kimi Code usage mapping, is adapted from [CodexBar](https://github.com/steipete/CodexBar). Its license follows.
+Provider usage parsing in `Sources/TokenSpenderCore/DirectSources.swift`, including the Kimi Code usage mapping, is adapted from [CodexBar](https://github.com/steipete/CodexBar). `Sources/TokenSpenderCore/NativeClaude.swift` also adapts its Claude OAuth credential/window parsing, profile-path conventions, request headers, and legacy Keychain interaction control, from `ClaudeOAuthCredentialModels.swift`, `ClaudeOAuthUsageFetcher.swift`, `ClaudeConfigPaths.swift`, and `KeychainSecurity.swift`. Its license follows.
 
 ## CodexBar — MIT License
 
@@ -26,4 +26,4 @@ SOFTWARE.
 
 ## Runtime integration
 
-[claude-swap](https://github.com/realiti4/claude-swap) is installed separately and invoked to obtain Claude account usage. It is not bundled. Provider names and referenced products belong to their respective owners; this project is not endorsed by them.
+[claude-swap](https://github.com/realiti4/claude-swap) is an optional, separately installed integration invoked for configured managed Claude accounts; a native single Claude Code login does not require it. It is not bundled. Provider names and referenced products belong to their respective owners; this project is not endorsed by them.

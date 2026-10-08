@@ -1,0 +1,12 @@
+{
+  "account": {
+    "uuid": "00000000-0000-0000-0000-000000000001",
+    "email": "native@example.com",
+    "display_name": "Example User"
+  },
+  "organization": {
+    "uuid": "00000000-0000-0000-0000-000000000002",
+    "name": "Example Organization",
+    "organization_type": "claude_max"
+  }
+}

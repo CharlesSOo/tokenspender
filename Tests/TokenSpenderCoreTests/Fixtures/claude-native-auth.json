@@ -1,0 +1,10 @@
+{
+  "claudeAiOauth": {
+    "accessToken": "fake-claude-access-token",
+    "refreshToken": "fake-unused-refresh-token",
+    "expiresAt": 4102444800000,
+    "scopes": ["user:profile", "user:inference"],
+    "subscriptionType": "max"
+  },
+  "mcpOAuth": {}
+}

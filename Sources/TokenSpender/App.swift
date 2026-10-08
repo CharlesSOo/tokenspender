@@ -195,6 +195,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
         menu.addItem(.separator())
+        if store.snapshot.claude.contains(where: { $0.usage.needsClaudeAuthorization }) {
+            let item = NSMenuItem(title: "Authorize Claude Code access…", action: #selector(authorizeClaude), keyEquivalent: "")
+            item.target = self
+            item.isEnabled = !store.isRefreshing
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
         let animation = NSMenu(title: "Animation")
         for option in CritterAnimation.allCases {
             let item = NSMenuItem(title: option.title, action: #selector(pickAnimation(_:)), keyEquivalent: "")
@@ -216,6 +223,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func pickSelection(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let selection = DisplaySelection(rawValue: raw) else { return }
         store.selection = selection
+    }
+
+    @objc private func authorizeClaude() {
+        // Only this deliberate action may let macOS show credential-access consent. Refresh/poll never do.
+        NSApp.activate(ignoringOtherApps: true)
+        store.refresh(authorizeClaude: true)
     }
 
     @objc private func pickAnimation(_ sender: NSMenuItem) {
@@ -400,12 +413,12 @@ final class Store {
         refresh()
     }
 
-    func refresh() {
+    func refresh(authorizeClaude: Bool = false) {
         guard !isRefreshing, !Self.demo else { return }
         isRefreshing = true
         onChange?()
         Task {
-            snapshot = await Fetcher.fetchAll()
+            snapshot = await Fetcher.fetchAll(authorizeClaude: authorizeClaude)
             let now = Date()
             var keys: Set<String> = []
             for row in rows where row.usage.error == nil && !row.id.hasPrefix("claude/unverified/") {
