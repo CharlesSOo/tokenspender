@@ -40,15 +40,15 @@ public struct ClaudeAccount: Equatable, Sendable {
     public let slot: Int
     public let email: String
     public var usage: RowUsage
+    /// Account UUID + organization UUID from cswap metadata; nil when identity cannot be verified.
+    public let id: String?
 
-    public init(slot: Int, email: String, usage: RowUsage) {
+    public init(slot: Int, email: String, usage: RowUsage, id: String? = nil) {
         self.slot = slot
         self.email = email
         self.usage = usage
+        self.id = id
     }
-
-    /// Stable key for sample history and UI identity.
-    public var id: String { "claude/\(slot)/\(email)" }
 }
 
 /// One fetch of every provider. Claude accounts come from cswap and may be empty.
@@ -224,6 +224,7 @@ public enum Parse {
         struct Account: Decodable {
             let number: Int?
             let email: String
+            let organizationUuid: String?
             let usageStatus: String?
             let usageFetchedAt: String?
             let usage: Usage?
@@ -232,12 +233,41 @@ public enum Parse {
     }
 
 
-    /// Accounts ordered by slot number; slots without a number are skipped. Nil if the JSON is unreadable.
-    public static func cswap(_ data: Data) -> [ClaudeAccount]? {
+    /// Identity-only projection of cswap's sequence.json, never its credential backups.
+    private struct CSSequence: Decodable {
+        struct Account: Decodable {
+            let email: String
+            let uuid: String
+            let organizationUuid: String?
+
+            var id: String? {
+                guard let account = UUID(uuidString: uuid) else { return nil }
+                let org = organizationUuid ?? ""
+                guard org.isEmpty || UUID(uuidString: org) != nil else { return nil }
+                return "claude/\(account.uuidString.lowercased())/\(org.lowercased())"
+            }
+        }
+        let accounts: [String: Account]
+    }
+
+    /// Slots sort the UI, never identify a selection. A missing/inconsistent metadata join leaves
+    /// usage visible in the pool but cannot be pinned. Duplicate identities also fail closed.
+    public static func cswap(_ data: Data, metadata: Data? = nil) -> [ClaudeAccount]? {
         guard let list = try? JSONDecoder().decode(CSList.self, from: data) else { return nil }
-        return list.accounts
-            .compactMap { a in a.number.map { ClaudeAccount(slot: $0, email: a.email, usage: cswapUsage(a)) } }
-            .sorted { $0.slot < $1.slot }
+        let sequence = metadata.flatMap { try? JSONDecoder().decode(CSSequence.self, from: $0) }
+        let identities = sequence?.accounts.values.compactMap(\.id) ?? []
+        return list.accounts.compactMap { a -> ClaudeAccount? in
+            guard let slot = a.number else { return nil }
+            var id: String?
+            if let record = sequence?.accounts[String(slot)], record.email == a.email,
+               (record.organizationUuid ?? "").lowercased() == (a.organizationUuid ?? "").lowercased(),
+               let candidate = record.id,
+               identities.filter({ $0 == candidate }).count == 1,
+               list.accounts.filter({ $0.number == slot }).count == 1 {
+                id = candidate
+            }
+            return ClaudeAccount(slot: slot, email: a.email, usage: cswapUsage(a), id: id)
+        }.sorted { $0.slot < $1.slot }
     }
 
     private static func cswapUsage(_ account: CSList.Account) -> RowUsage {

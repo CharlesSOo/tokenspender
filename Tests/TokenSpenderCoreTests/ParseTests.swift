@@ -12,7 +12,7 @@ final class ParseTests: XCTestCase {
         XCTAssertNotNil(rows[0].usage.windows[0].resetsAt)
         XCTAssertNotNil(rows[0].usage.observedAt)
         XCTAssertNil(rows[1].usage.windows[0].resetsAt)
-        XCTAssertNotEqual(rows[0].id, ClaudeAccount(slot: 1, email: "other@example.com", usage: RowUsage()).id)
+        XCTAssertNil(rows[0].id) // Usage-only list output cannot establish stable identity.
     }
 
     func testStatusesOverrideCachedUsageAndMissingFields() throws {

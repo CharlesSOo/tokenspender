@@ -16,7 +16,12 @@ public enum Fetcher {
 
     static func claudeAccounts() async -> [ClaudeAccount] {
         guard let out = await run(NSHomeDirectory() + "/.local/bin/cswap", ["list", "--json"]),
-              let accounts = autoreleasepool(invoking: { Parse.cswap(out) }) else {
+              let accounts = autoreleasepool(invoking: {
+                  // macOS cswap stores identity metadata here (paths.py / sequence.json).
+                  // Read only metadata, never backup credentials; inconsistent joins fail closed.
+                  let metadata = try? Data(contentsOf: URL(fileURLWithPath: NSHomeDirectory() + "/.claude-swap-backup/sequence.json"))
+                  return Parse.cswap(out, metadata: metadata)
+              }) else {
             return [ClaudeAccount(slot: 0, email: "Accounts unavailable", usage: .failure("unavailable"))]
         }
         return accounts

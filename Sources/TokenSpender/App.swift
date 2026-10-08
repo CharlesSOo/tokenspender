@@ -64,12 +64,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func storeChanged() {
-        let text = MenuLabel.text(mode: store.mode, snapshot: store.snapshot)
+        let text = store.selection.text(snapshot: store.snapshot)
         statusItem.button?.attributedTitle = NSAttributedString(
             string: " " + text,
             attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)]
         )
-        statusItem.button?.toolTip = "Estimated equal-account mean of limiting quotas, not token capacity. Missing/expired accounts excluded. Animation indicates log activity only."
+        statusItem.button?.toolTip = store.selection.tooltip(snapshot: store.snapshot)
+        statusItem.button?.setAccessibilityLabel("\(store.selection.title(snapshot: store.snapshot)): \(text) remaining")
         popoverView?.model = model(now: Date())
         resizePanel()
     }
@@ -183,11 +184,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showSettingsMenu(in view: NSView, at point: NSPoint) {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        for mode in DisplayMode.allCases {
-            let item = NSMenuItem(title: mode.title, action: #selector(pickMode(_:)), keyEquivalent: "")
+        let choices = DisplaySelection.choices(snapshot: store.snapshot, selected: store.selection)
+        for (index, choice) in choices.enumerated() {
+            if index == DisplayMode.allCases.count { menu.addItem(.separator()) }
+            let item = NSMenuItem(title: choice.title, action: #selector(pickSelection(_:)), keyEquivalent: "")
             item.target = self
-            item.tag = mode.rawValue
-            item.state = mode == store.mode ? .on : .off
+            item.representedObject = choice.selection.rawValue
+            item.state = choice.selection == store.selection ? .on : .off
+            item.isEnabled = choice.enabled
             menu.addItem(item)
         }
         menu.addItem(.separator())
@@ -209,9 +213,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if panel?.isKeyWindow == false { panel?.makeKey() }
     }
 
-    @objc private func pickMode(_ sender: NSMenuItem) {
-        guard let mode = DisplayMode(rawValue: sender.tag) else { return }
-        store.mode = mode
+    @objc private func pickSelection(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let selection = DisplaySelection(rawValue: raw) else { return }
+        store.selection = selection
     }
 
     @objc private func pickAnimation(_ sender: NSMenuItem) {
@@ -360,13 +364,17 @@ final class Store {
     private(set) var snapshot = UsageSnapshot(codex: RowUsage(), kimi: .notConfigured)
     var rows: [Row] {
         [Row(id: "codex/" + (snapshot.codex.identity ?? "unknown"), provider: "CODEX", title: "Codex", usage: snapshot.codex)] +
-        snapshot.claude.map { Row(id: $0.id, provider: "CLAUDE", title: $0.email, usage: $0.usage) } +
+        snapshot.claude.map { Row(id: $0.id ?? "claude/unverified/\($0.slot)", provider: "CLAUDE", title: $0.email, usage: $0.usage) } +
         [Row(id: "kimi/" + (snapshot.kimi.identity ?? "unknown"), provider: "KIMI", title: "Kimi", usage: snapshot.kimi)]
     }
     private(set) var updatedAt: Date?
     private(set) var isRefreshing = false
-    var mode = (UserDefaults.standard.object(forKey: "displayMode.v2") as? Int).flatMap(DisplayMode.init) ?? .availableNow {
-        didSet { UserDefaults.standard.set(mode.rawValue, forKey: "displayMode.v2"); onChange?() }
+    var selection = demo ? DisplaySelection.mode(.availableNow) :
+        UserDefaults.standard.string(forKey: "displaySelection").flatMap(DisplaySelection.init(rawValue:)) ?? .mode(.availableNow) {
+        didSet {
+            if !Self.demo { UserDefaults.standard.set(selection.rawValue, forKey: "displaySelection") }
+            onChange?()
+        }
     }
     var animation = CritterAnimation(rawValue: UserDefaults.standard.string(forKey: "animation.v2") ?? "") ?? .eating {
         didSet { UserDefaults.standard.set(animation.rawValue, forKey: "animation.v2") }
@@ -400,7 +408,7 @@ final class Store {
             snapshot = await Fetcher.fetchAll()
             let now = Date()
             var keys: Set<String> = []
-            for row in rows where row.usage.error == nil {
+            for row in rows where row.usage.error == nil && !row.id.hasPrefix("claude/unverified/") {
                 for (index, window) in row.usage.windows.enumerated() {
                     let k = key(row: row, index: index)
                     keys.insert(k)
@@ -424,8 +432,8 @@ final class Store {
         snapshot = UsageSnapshot(
             codex: RowUsage(windows: [window("WK", 73, 5 * 1440 + 20 * 60)]),
             claude: [
-                ClaudeAccount(slot: 1, email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60)])),
-                ClaudeAccount(slot: 2, email: "work@example.com", usage: RowUsage(windows: [window("5H", 88, 72), window("WK", 61, 2 * 1440 + 3 * 60)]))
+                ClaudeAccount(slot: 1, email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/"),
+                ClaudeAccount(slot: 2, email: "work@example.com", usage: RowUsage(windows: [window("5H", 88, 72), window("WK", 61, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/")
             ], kimi: .notConfigured)
         for (minutesAgo, left) in [(30.0, 61.09), (15.0, 51.545), (0.0, 42.0)] {
             history.append(key(row: rows[1], index: 0), UsageSample(at: now.addingTimeInterval(-minutesAgo * 60), percentLeft: left))

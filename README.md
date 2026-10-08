@@ -27,7 +27,7 @@ Builds for your Mac, ad-hoc signs, installs to `~/Applications/tokenspender.app`
 
 ## Accounts
 
-- **Claude:** install [claude-swap](https://github.com/realiti4/claude-swap), save accounts with `cswap add`, and ensure `cswap list --json` works. Accounts are discovered dynamically. claude-swap manages and may refresh its own credentials.
+- **Claude:** install [claude-swap](https://github.com/realiti4/claude-swap), save accounts with `cswap add`, and ensure `cswap list --json` works. One saved account is sufficient; no second account or switching setup is required. Accounts are discovered dynamically. claude-swap manages and may refresh its own credentials. Native standalone Claude Code login without cswap is not yet supported (see [integration notes](docs/account-selection.md)).
 - **Codex:** sign in through Codex CLI. Reads `~/.codex/auth.json`; a Pi OpenAI login is not interchangeable with this ChatGPT usage credential.
 - **Kimi:** sign in to `kimi-coding` in Pi. Reads `~/.pi/agent/auth.json`. Missing credentials hide the provider; expired or unreadable configured credentials show an error.
 
@@ -38,6 +38,9 @@ Direct Codex/Kimi credentials are read-only: renew expired logins in their ownin
 - **Available now:** estimated mean of each available account's limiting remaining percentage.
 - **Lowest account:** the lowest remaining quota.
 - **Claude pool / Codex pool:** the corresponding provider's estimated remaining percentage.
+- **Claude: account — pinned:** Settings lists individual Claude accounts beneath the pools. Pins the menu-bar percentage to that account's limiting window (including weekly exhaustion), without hiding any accounts in the popover or switching Claude Code's login. Selection persists across relaunches and follows stable account identity through label/slot changes. A missing or unverifiable selected account shows **—**, never another account.
+
+A single Claude account still offers explicit pool versus pinned selection: the pool follows future membership; the pin does not. No redundant individual Codex choice is added. Identity is joined read-only from cswap's `~/.claude-swap-backup/sequence.json`; missing or inconsistent identity metadata disables individual selection, while pool usage remains available. Existing four modes remain; the new selection setting starts at Available now.
 
 **These aggregates are estimates, not a shared token balance.** Providers do not expose comparable token capacities; accounts are weighted equally, not by invented plan multipliers. A weekly limit can constrain an account even when its five-hour window has room. Exact per-account bars remain visible.
 
