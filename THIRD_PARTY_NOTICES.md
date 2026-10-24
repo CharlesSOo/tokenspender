@@ -1,6 +1,6 @@
 # Third-party notices
 
-Provider usage parsing in `Sources/MunchCore/DirectSources.swift`, including the Kimi Code usage mapping, is adapted from [CodexBar](https://github.com/steipete/CodexBar). `Sources/MunchCore/NativeClaude.swift` also adapts its Claude OAuth credential/window parsing, profile-path conventions, request headers, and legacy Keychain interaction control, from `ClaudeOAuthCredentialModels.swift`, `ClaudeOAuthUsageFetcher.swift`, `ClaudeConfigPaths.swift`, and `KeychainSecurity.swift`. Its license follows.
+Provider usage parsing in `Sources/TokenmeterCore/DirectSources.swift`, including the Kimi Code usage mapping, is adapted from [CodexBar](https://github.com/steipete/CodexBar). `Sources/TokenmeterCore/NativeClaude.swift` also adapts its Claude OAuth credential/window parsing, profile-path conventions, request headers, and legacy Keychain interaction control, from `ClaudeOAuthCredentialModels.swift`, `ClaudeOAuthUsageFetcher.swift`, `ClaudeConfigPaths.swift`, and `KeychainSecurity.swift`. Its license follows.
 
 ## CodexBar — MIT License
 

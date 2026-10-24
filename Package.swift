@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "Munch",
+    name: "Tokenmeter",
     platforms: [.macOS(.v14)],
     targets: [
-        .target(name: "MunchCore"),
-        .executableTarget(name: "Munch", dependencies: ["MunchCore"]),
+        .target(name: "TokenmeterCore"),
+        .executableTarget(name: "Tokenmeter", dependencies: ["TokenmeterCore"]),
         .testTarget(
-            name: "MunchCoreTests",
-            dependencies: ["MunchCore"],
+            name: "TokenmeterCoreTests",
+            dependencies: ["TokenmeterCore"],
             resources: [.copy("Fixtures")]
         ),
     ]

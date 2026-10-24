@@ -1,5 +1,5 @@
 import XCTest
-@testable import MunchCore
+@testable import TokenmeterCore
 
 final class FetcherTests: XCTestCase {
     func testSuccessAndNonzeroExit() async {

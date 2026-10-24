@@ -1,4 +1,4 @@
-# Munch
+# Tokenmeter
 
 Native macOS menu-bar monitor for Claude, Codex and Kimi quota remaining.
 
