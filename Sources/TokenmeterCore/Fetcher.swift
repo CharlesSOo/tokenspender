@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-/// Direct providers are read-only. cswap owns Claude credentials and may refresh them itself.
+/// Codex renews its file-backed login. cswap owns managed Claude credentials and their renewal.
 public enum Fetcher {
     public static func fetchAll(authorizeClaude: Bool = false) async -> UsageSnapshot {
         async let codex = DirectSources.codex()

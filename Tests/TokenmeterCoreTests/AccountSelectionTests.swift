@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import TokenSpenderCore
+@testable import TokenmeterCore
 
 final class AccountSelectionTests: XCTestCase {
     private let first = "00000000-0000-0000-0000-000000000001"

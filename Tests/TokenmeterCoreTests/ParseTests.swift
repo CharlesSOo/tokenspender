@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import TokenSpenderCore
+@testable import TokenmeterCore
 
 final class ParseTests: XCTestCase {
     func testCswapDynamicAccountsAndFreshness() throws {

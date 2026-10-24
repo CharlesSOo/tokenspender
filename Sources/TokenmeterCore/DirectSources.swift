@@ -3,8 +3,8 @@ import CryptoKit
 
 /// Direct usage fetchers for Codex and Kimi that bypass CodexBarCLI.
 ///
-/// Credentials are read-only and never logged:
-/// - Codex: `~/.codex/auth.json` (Codex CLI's own token; carries `account_id`). Pi's `openai`
+/// Credentials are never logged:
+/// - Codex: `~/.codex/auth.json` (renewed by CodexOAuth; carries `account_id`). Pi's `openai`
 ///   OAuth token is a ChatGPT-for-API token without `chatgpt_account_id` and is rejected by
 ///   `wham/usage` with 401 `rejected_by_access_enforcement`, so it cannot be used here.
 /// - Kimi: `~/.pi/agent/auth.json` key `kimi-coding` (Pi owns refresh; expired → "expired").
@@ -18,8 +18,23 @@ public enum DirectSources {
         config.timeoutIntervalForResource = timeout
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.urlCache = nil
-        return URLSession(configuration: config)
+        config.httpCookieStorage = nil
+        config.urlCredentialStorage = nil
+        return URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
     }()
+
+    private final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+    }
+
+    typealias Transport = (URLRequest) async throws -> (Data, Int)
+
+    static func request(_ req: URLRequest) async throws -> (Data, Int) {
+        let (data, response) = try await session.data(for: req)
+        return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
+    }
 
     // MARK: - Credentials
 
@@ -27,6 +42,7 @@ public enum DirectSources {
         let access: String
         let expires: Date?
         var accountId: String?
+        var refresh: String?
     }
 
     enum CredentialError: Error, Equatable {
@@ -83,6 +99,7 @@ public enum DirectSources {
         struct Tokens: Decodable {
             let access_token: String
             let account_id: String?
+            let refresh_token: String?
         }
         let tokens: Tokens?
         private enum CodingKeys: String, CodingKey { case tokens }
@@ -93,16 +110,16 @@ public enum DirectSources {
     }
 
     /// Codex CLI `auth.json`: `{ tokens: { access_token, account_id, ... } }`; expiry from the JWT `exp` claim.
-    static func codexCredential(authJSON: Data, now: Date = Date()) -> Result<Credential, CredentialError> {
+    static func codexCredential(authJSON: Data, now: Date = Date(), allowExpired: Bool = false) -> Result<Credential, CredentialError> {
         guard let auth = try? JSONDecoder().decode(CodexAuth.self, from: authJSON) else { return .failure(.unreadable) }
         guard let t = auth.tokens else { return .failure(.missing) }
         guard !t.access_token.isEmpty else { return .failure(.unreadable) }
         let claims = jwtClaims(t.access_token)
         let expires = (claims?["exp"] as? Double).map { Date(timeIntervalSince1970: $0) }
-        if let expires, expires <= now { return .failure(.expired) }
+        if !allowExpired, let expires, expires <= now { return .failure(.expired) }
         let accountId = t.account_id
             ?? (claims?["https://api.openai.com/auth"] as? [String: Any])?["chatgpt_account_id"] as? String
-        return .success(Credential(access: t.access_token, expires: expires, accountId: accountId))
+        return .success(Credential(access: t.access_token, expires: expires, accountId: accountId, refresh: t.refresh_token))
     }
 
     /// Decodes a JWT payload (base64url, no signature check).
@@ -143,19 +160,39 @@ public enum DirectSources {
     }
 
     public static func codex() async -> RowUsage {
-        let cred: Credential
-        switch readFile(codexAuthPath).flatMap({ codexCredential(authJSON: $0) }) {
-        case .failure(let e): return .failure(e.message)
-        case .success(let c): cred = c
+        await codex(path: codexAuthPath, transport: request)
+    }
+
+    static func codex(path: String, now: Date = Date(), oauth: CodexOAuth = .shared,
+                      transport: @escaping Transport) async -> RowUsage {
+        do {
+            var cred = try await oauth.credential(path: path, now: now, transport: transport)
+            var (data, status) = try await transport(codexRequest(cred))
+            if status == 401 {
+                cred = try await oauth.credential(path: path, rejected: cred, now: now, transport: transport)
+                (data, status) = try await transport(codexRequest(cred))
+            }
+            guard status != 401 else { throw CodexOAuth.Failure.loginRequired }
+            guard status == 200 else { return .failure(Parse.quiet("HTTP \(status)")) }
+            var row = parseCodex(data)
+            row.observedAt = Date()
+            row.identity = cred.accountId ?? SHA256.hash(data: Data(cred.access.utf8)).description
+            return row
+        } catch let error as CredentialError {
+            return .failure(error.message)
+        } catch let error as CodexOAuth.Failure {
+            return .failure(error.rawValue)
+        } catch {
+            return .failure(Parse.quiet((error as? URLError)?.code == .timedOut ? "timed out" : "network error"))
         }
+    }
+
+    private static func codexRequest(_ cred: Credential) -> URLRequest {
         var req = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!, timeoutInterval: timeout)
         req.setValue("Bearer \(cred.access)", forHTTPHeaderField: "Authorization")
         if let id = cred.accountId { req.setValue(id, forHTTPHeaderField: "ChatGPT-Account-Id") }
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        var row = await fetch(req, parse: { parseCodex($0) })
-        row.observedAt = Date()
-        row.identity = cred.accountId ?? SHA256.hash(data: Data(cred.access.utf8)).description
-        return row
+        return req
     }
 
     // MARK: - Kimi: GET https://api.kimi.com/coding/v1/usages (ported from CodexBar KimiUsageFetcher.fetchCodeAPIUsage)

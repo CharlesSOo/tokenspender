@@ -1,10 +1,10 @@
 import AppKit
 import ImageIO
 import ServiceManagement
-import TokenSpenderCore
+import TokenmeterCore
 
 @main
-enum TokenSpenderApp {
+enum TokenmeterApp {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
@@ -33,13 +33,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let env = ProcessInfo.processInfo.environment
-        if Store.demo, let dir = env["TOKENSPENDER_SNAPSHOT_DIR"] {
+        if Store.demo, let dir = env["TOKENMETER_SNAPSHOT_DIR"] {
             store.start()
             Task { await snapshot(to: dir) }
             return
         }
         let key = "registeredLoginItem"
-        if !Store.demo, env["TOKENSPENDER_BENCH"] == nil, !UserDefaults.standard.bool(forKey: key) {
+        if !Store.demo, env["TOKENMETER_BENCH"] == nil, !UserDefaults.standard.bool(forKey: key) {
             do {
                 try SMAppService.mainApp.register()
                 UserDefaults.standard.set(true, forKey: key)
@@ -60,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setAnimating(activity.isBurning)
         }
         applyAnimationSetting()
-        if env["TOKENSPENDER_BENCH"] != nil { installBenchSignals() }
+        if env["TOKENMETER_BENCH"] != nil { installBenchSignals() }
     }
 
     private func storeChanged() {
@@ -373,7 +373,7 @@ struct Row {
 
 @MainActor
 final class Store {
-    static let demo = ProcessInfo.processInfo.environment["TOKENSPENDER_DEMO"] != nil
+    static let demo = ProcessInfo.processInfo.environment["TOKENMETER_DEMO"] != nil
     private(set) var snapshot = UsageSnapshot(codex: RowUsage(), kimi: .notConfigured)
     var rows: [Row] {
         [Row(id: "codex/" + (snapshot.codex.identity ?? "unknown"), provider: "CODEX", title: "Codex", usage: snapshot.codex)] +

@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import TokenSpenderCore
+@testable import TokenmeterCore
 
 final class DirectSourcesTests: XCTestCase {
     private func fixture(_ name: String) throws -> Data {
