@@ -19,7 +19,7 @@ macOS 14+ and Xcode Command Line Tools. Installs to `~/Applications` and starts 
 
 ## How it works
 
-Reads the credentials your CLIs already have (Claude Code, Codex CLI, Pi for Kimi) and asks each provider for remaining quota. Nothing is stored or sent anywhere else. Claude needs a one-time Keychain approval in Settings. Multiple Claude accounts via [claude-swap](https://github.com/realiti4/claude-swap), see [docs](docs/account-selection.md).
+Reads the credentials your CLIs already have (Claude Code, Codex CLI, Pi for Kimi) and asks each provider for remaining quota. Codex access tokens renew automatically; rotated credentials are saved back to `~/.codex/auth.json` with owner-only permissions. Credentials are only sent to their provider. Claude needs a one-time Keychain approval in Settings. Multiple Claude accounts via [claude-swap](https://github.com/realiti4/claude-swap), see [docs](docs/account-selection.md).
 
 The menu-bar number is an estimate across accounts, not a shared token balance. Per-account bars and reset times are in the popover. The animation reacts to session-log activity, not measured token spend.
 
