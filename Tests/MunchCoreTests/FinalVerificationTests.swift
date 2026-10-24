@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 import Darwin
-@testable import TokenSpenderCore
+@testable import MunchCore
 
 final class FinalVerificationTests: XCTestCase {
     func testMalformedPresentKimiOAuthIsVisibleError() {

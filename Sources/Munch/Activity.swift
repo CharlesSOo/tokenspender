@@ -8,7 +8,7 @@ final class SessionLogActivity {
     var onChange: (() -> Void)?
     private var stream: FSEventStreamRef?
     private var idleTimer: Timer?
-    private let queue = DispatchQueue(label: "so.charles.tokenspender.fsevents", qos: .utility)
+    private let queue = DispatchQueue(label: "so.charles.munch.fsevents", qos: .utility)
     private static let idleSeconds: TimeInterval = 8
     private static let paths = [".claude/projects", ".pi/agent/sessions", ".codex/sessions"]
         .map { NSHomeDirectory() + "/" + $0 }

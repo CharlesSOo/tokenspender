@@ -1,7 +1,7 @@
 import Foundation
 import Security
 import XCTest
-@testable import TokenSpenderCore
+@testable import MunchCore
 
 /// Independent verification: synthetic inputs only; never invoke live auth or provider transports.
 final class StandaloneVerificationTests: XCTestCase {

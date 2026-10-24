@@ -1,4 +1,4 @@
-# tokenspender
+# Munch
 
 Native macOS menu-bar monitor for Claude, Codex and Kimi quota remaining.
 
@@ -15,7 +15,7 @@ cd tokenspender
 ./install.sh
 ```
 
-macOS 14+ and Xcode Command Line Tools. Installs to `~/Applications` and starts at login.
+macOS 14+ and Xcode Command Line Tools. Installs to `/Applications` and starts at login.
 
 ## How it works
 

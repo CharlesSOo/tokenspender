@@ -68,7 +68,7 @@ public enum NativeClaude {
         return try credential(result.get())
     }
 
-    private static let keychainQueue = DispatchQueue(label: "tokenspender.claude-keychain", qos: .utility)
+    private static let keychainQueue = DispatchQueue(label: "Munch.claude-keychain", qos: .utility)
 
     static func keychainFailure(_ status: OSStatus) -> Failure {
         switch status {

@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import TokenSpenderCore
+@testable import MunchCore
 
 final class CodexOAuthTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_791_454_000)
