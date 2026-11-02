@@ -3,6 +3,22 @@ import XCTest
 @testable import TokenmeterCore
 
 final class AccountSelectionTests: XCTestCase {
+    func testMarkedAccountDropsFiveHourFromBarsAndMenuNumber() {
+        let fiveHour = UsageWindow(label: "5H", percentLeft: 10, resetsAt: nil)
+        let weekly = UsageWindow(label: "WK", percentLeft: 60, resetsAt: nil)
+        let snapshot = UsageSnapshot(claude: [
+            ClaudeAccount(slot: 1, email: "ultra@example.com", usage: RowUsage(windows: [fiveHour, weekly]), id: "claude/ultra"),
+            ClaudeAccount(slot: 2, email: "max@example.com", usage: RowUsage(windows: [fiveHour, weekly]), id: "claude/max"),
+            ClaudeAccount(slot: 3, email: "only@example.com", usage: RowUsage(windows: [fiveHour]), id: "claude/only"),
+            ClaudeAccount(slot: 4, email: "unverified@example.com", usage: RowUsage(windows: [fiveHour, weekly]))
+        ])
+        let result = snapshot.withoutFiveHour(accounts: ["claude/ultra", "claude/only"])
+        XCTAssertEqual(result.claude.map { $0.usage.windows.map(\.label) }, [["WK"], ["5H", "WK"], ["5H"], ["5H", "WK"]])
+        XCTAssertEqual(result.claude[0].usage.constraining?.percentLeft, 60)
+        XCTAssertEqual(DisplaySelection.claudeAccount("claude/ultra").text(snapshot: result), "60%")
+        XCTAssertEqual(snapshot.withoutFiveHour(accounts: []), snapshot)
+    }
+
     private let first = "00000000-0000-0000-0000-000000000001"
     private let second = "00000000-0000-0000-0000-000000000002"
     private let org = "00000000-0000-0000-0000-000000000003"

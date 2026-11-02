@@ -67,6 +67,18 @@ public struct UsageSnapshot: Equatable, Sendable {
 
     /// Claude usages with credentials (hidden slots excluded).
     public var claudeUsages: [RowUsage] { claude.map(\.usage).filter(\.isConfigured) }
+
+    /// Claude's usage API can keep reporting a 5H window for plans that no longer enforce one, and
+    /// nothing in it identifies the plan, so the user marks those accounts. An account's only window is kept.
+    public func withoutFiveHour(accounts ids: Set<String>) -> UsageSnapshot {
+        var copy = self
+        for index in copy.claude.indices {
+            guard let id = copy.claude[index].id, ids.contains(id) else { continue }
+            let remaining = copy.claude[index].usage.windows.filter { $0.label != "5H" }
+            if !remaining.isEmpty { copy.claude[index].usage.windows = remaining }
+        }
+        return copy
+    }
 }
 
 /// What the menu-bar label shows. Raw values are persisted in UserDefaults; case order is menu order.

@@ -202,6 +202,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
             menu.addItem(.separator())
         }
+        let accounts = store.snapshot.claude.filter { $0.id != nil && $0.usage.isConfigured }
+        for account in accounts {
+            let item = NSMenuItem(title: "No 5-hour limit: \(account.email)", action: #selector(toggleNoFiveHour(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = account.id
+            item.state = store.noFiveHourAccounts.contains(account.id ?? "") ? .on : .off
+            menu.addItem(item)
+        }
+        if !accounts.isEmpty { menu.addItem(.separator()) }
         let animation = NSMenu(title: "Animation")
         for option in CritterAnimation.allCases {
             let item = NSMenuItem(title: option.title, action: #selector(pickAnimation(_:)), keyEquivalent: "")
@@ -223,6 +232,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func pickSelection(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let selection = DisplaySelection(rawValue: raw) else { return }
         store.selection = selection
+    }
+
+    @objc private func toggleNoFiveHour(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        store.toggleNoFiveHour(account: id)
     }
 
     @objc private func authorizeClaude() {
@@ -374,7 +388,15 @@ struct Row {
 @MainActor
 final class Store {
     static let demo = ProcessInfo.processInfo.environment["TOKENMETER_DEMO"] != nil
-    private(set) var snapshot = UsageSnapshot(codex: RowUsage(), kimi: .notConfigured)
+    private var fetched = UsageSnapshot(codex: RowUsage(), kimi: .notConfigured)
+    var snapshot: UsageSnapshot { fetched.withoutFiveHour(accounts: noFiveHourAccounts) }
+    /// Claude account ids the user marked as having no 5-hour limit.
+    private(set) var noFiveHourAccounts = Set(UserDefaults.standard.stringArray(forKey: "noFiveHourAccounts") ?? [])
+    func toggleNoFiveHour(account id: String) {
+        if noFiveHourAccounts.remove(id) == nil { noFiveHourAccounts.insert(id) }
+        UserDefaults.standard.set(noFiveHourAccounts.sorted(), forKey: "noFiveHourAccounts")
+        onChange?()
+    }
     var rows: [Row] {
         [Row(id: "codex/" + (snapshot.codex.identity ?? "unknown"), provider: "CODEX", title: "Codex", usage: snapshot.codex)] +
         snapshot.claude.map { Row(id: $0.id ?? "claude/unverified/\($0.slot)", provider: "CLAUDE", title: $0.email, usage: $0.usage) } +
@@ -418,7 +440,7 @@ final class Store {
         isRefreshing = true
         onChange?()
         Task {
-            snapshot = await Fetcher.fetchAll(authorizeClaude: authorizeClaude)
+            fetched = await Fetcher.fetchAll(authorizeClaude: authorizeClaude)
             let now = Date()
             var keys: Set<String> = []
             for row in rows where row.usage.error == nil && !row.id.hasPrefix("claude/unverified/") {
@@ -442,7 +464,7 @@ final class Store {
         func window(_ label: String, _ left: Double, _ minutes: Double) -> UsageWindow {
             UsageWindow(label: label, percentLeft: left, resetsAt: now.addingTimeInterval(minutes * 60))
         }
-        snapshot = UsageSnapshot(
+        fetched = UsageSnapshot(
             codex: RowUsage(windows: [window("WK", 73, 5 * 1440 + 20 * 60)]),
             claude: [
                 ClaudeAccount(slot: 1, email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/"),
