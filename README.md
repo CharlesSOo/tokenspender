@@ -1,4 +1,4 @@
-# Tokenmeter
+# QuotaTracker
 
 Native macOS menu-bar monitor for Claude, Codex and Kimi quota remaining.
 

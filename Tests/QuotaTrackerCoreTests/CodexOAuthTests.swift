@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import TokenmeterCore
+@testable import QuotaTrackerCore
 
 final class CodexOAuthTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_791_454_000)

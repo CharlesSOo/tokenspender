@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import TokenmeterCore
+@testable import QuotaTrackerCore
 
 final class AccountSelectionTests: XCTestCase {
     func testMarkedAccountDropsFiveHourFromBarsAndMenuNumber() {

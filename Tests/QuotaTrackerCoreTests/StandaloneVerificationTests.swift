@@ -1,7 +1,7 @@
 import Foundation
 import Security
 import XCTest
-@testable import TokenmeterCore
+@testable import QuotaTrackerCore
 
 /// Independent verification: synthetic inputs only; never invoke live auth or provider transports.
 final class StandaloneVerificationTests: XCTestCase {

@@ -1,23 +1,23 @@
 #!/bin/sh
-# Build a size-optimized release, assemble Tokenmeter.app, install to /Applications, launch.
+# Build a size-optimized release, assemble QuotaTracker.app, install to /Applications, launch.
 set -eu
 cd "$(dirname "$0")"
 
 swift build -c release -Xswiftc -Osize -Xlinker -dead_strip
 
-APP=build/Tokenmeter.app
+APP=build/QuotaTracker.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-cp .build/release/Tokenmeter "$APP/Contents/MacOS/Tokenmeter"
-strip -x "$APP/Contents/MacOS/Tokenmeter"
+cp .build/release/QuotaTracker "$APP/Contents/MacOS/QuotaTracker"
+strip -x "$APP/Contents/MacOS/QuotaTracker"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleIdentifier</key><string>so.charles.tokenmeter</string>
-  <key>CFBundleName</key><string>Tokenmeter</string>
-  <key>CFBundleExecutable</key><string>Tokenmeter</string>
+  <key>CFBundleIdentifier</key><string>so.charles.quotatracker</string>
+  <key>CFBundleName</key><string>QuotaTracker</string>
+  <key>CFBundleExecutable</key><string>QuotaTracker</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>
@@ -28,7 +28,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 codesign --force -s - "$APP"
 
-pkill -x Tokenmeter 2>/dev/null || true
-rm -rf "/Applications/Tokenmeter.app"
+pkill -x QuotaTracker 2>/dev/null || true
+rm -rf "/Applications/QuotaTracker.app"
 cp -R "$APP" "/Applications/"
-open "/Applications/Tokenmeter.app"
+open "/Applications/QuotaTracker.app"

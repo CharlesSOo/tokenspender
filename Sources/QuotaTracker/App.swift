@@ -1,10 +1,10 @@
 import AppKit
 import ImageIO
 import ServiceManagement
-import TokenmeterCore
+import QuotaTrackerCore
 
 @main
-enum TokenmeterApp {
+enum QuotaTrackerApp {
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
@@ -33,13 +33,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let env = ProcessInfo.processInfo.environment
-        if Store.demo, let dir = env["TOKENMETER_SNAPSHOT_DIR"] {
+        if Store.demo, let dir = env["QUOTATRACKER_SNAPSHOT_DIR"] {
             store.start()
             Task { await snapshot(to: dir) }
             return
         }
         let key = "registeredLoginItem"
-        if !Store.demo, env["TOKENMETER_BENCH"] == nil, !UserDefaults.standard.bool(forKey: key) {
+        if !Store.demo, env["QUOTATRACKER_BENCH"] == nil, !UserDefaults.standard.bool(forKey: key) {
             do {
                 try SMAppService.mainApp.register()
                 UserDefaults.standard.set(true, forKey: key)
@@ -60,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             setAnimating(activity.isBurning)
         }
         applyAnimationSetting()
-        if env["TOKENMETER_BENCH"] != nil { installBenchSignals() }
+        if env["QUOTATRACKER_BENCH"] != nil { installBenchSignals() }
     }
 
     private func storeChanged() {
@@ -387,7 +387,7 @@ struct Row {
 
 @MainActor
 final class Store {
-    static let demo = ProcessInfo.processInfo.environment["TOKENMETER_DEMO"] != nil
+    static let demo = ProcessInfo.processInfo.environment["QUOTATRACKER_DEMO"] != nil
     private var fetched = UsageSnapshot(codex: RowUsage(), kimi: .notConfigured)
     var snapshot: UsageSnapshot { fetched.withoutFiveHour(accounts: noFiveHourAccounts) }
     /// Claude account ids the user marked as having no 5-hour limit.
@@ -468,7 +468,7 @@ final class Store {
             codex: RowUsage(windows: [window("WK", 73, 5 * 1440 + 20 * 60)]),
             claude: [
                 ClaudeAccount(slot: 1, email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/"),
-                ClaudeAccount(slot: 2, email: "work@example.com", usage: RowUsage(windows: [window("5H", 88, 72), window("WK", 61, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/")
+                ClaudeAccount(slot: 2, email: "work@example.com", usage: RowUsage(windows: [window("WK", 61, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/")
             ], kimi: .notConfigured)
         for (minutesAgo, left) in [(30.0, 61.09), (15.0, 51.545), (0.0, 42.0)] {
             history.append(key(row: rows[1], index: 0), UsageSample(at: now.addingTimeInterval(-minutesAgo * 60), percentLeft: left))

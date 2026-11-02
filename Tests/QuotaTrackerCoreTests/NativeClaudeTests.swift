@@ -2,7 +2,7 @@ import Foundation
 import Security
 import LocalAuthentication
 import XCTest
-@testable import TokenmeterCore
+@testable import QuotaTrackerCore
 
 final class NativeClaudeTests: XCTestCase {
     private func fixture(_ name: String) throws -> Data {
