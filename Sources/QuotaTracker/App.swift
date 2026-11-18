@@ -195,13 +195,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        if store.snapshot.claude.contains(where: { $0.usage.needsClaudeAuthorization }) {
-            let item = NSMenuItem(title: "Authorize Claude Code access…", action: #selector(authorizeClaude), keyEquivalent: "")
-            item.target = self
-            item.isEnabled = !store.isRefreshing
-            menu.addItem(item)
-            menu.addItem(.separator())
-        }
         let accounts = store.snapshot.claude.filter { $0.id != nil && $0.usage.isConfigured }
         for account in accounts {
             let item = NSMenuItem(title: "No 5-hour limit: \(account.email)", action: #selector(toggleNoFiveHour(_:)), keyEquivalent: "")
@@ -237,12 +230,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleNoFiveHour(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         store.toggleNoFiveHour(account: id)
-    }
-
-    @objc private func authorizeClaude() {
-        // Only this deliberate action may let macOS show credential-access consent. Refresh/poll never do.
-        NSApp.activate(ignoringOtherApps: true)
-        store.refresh(authorizeClaude: true)
     }
 
     @objc private func pickAnimation(_ sender: NSMenuItem) {
@@ -399,7 +386,7 @@ final class Store {
     }
     var rows: [Row] {
         [Row(id: "codex/" + (snapshot.codex.identity ?? "unknown"), provider: "CODEX", title: "Codex", usage: snapshot.codex)] +
-        snapshot.claude.map { Row(id: $0.id ?? "claude/unverified/\($0.slot)", provider: "CLAUDE", title: $0.email, usage: $0.usage) } +
+        snapshot.claude.map { Row(id: $0.id ?? "claude/unverified/\($0.profile)", provider: "CLAUDE", title: $0.email, usage: $0.usage) } +
         [Row(id: "kimi/" + (snapshot.kimi.identity ?? "unknown"), provider: "KIMI", title: "Kimi", usage: snapshot.kimi)]
     }
     private(set) var updatedAt: Date?
@@ -435,19 +422,19 @@ final class Store {
         refresh()
     }
 
-    func refresh(authorizeClaude: Bool = false) {
+    func refresh() {
         guard !isRefreshing, !Self.demo else { return }
         isRefreshing = true
         onChange?()
         Task {
-            fetched = await Fetcher.fetchAll(authorizeClaude: authorizeClaude)
+            fetched = await Fetcher.fetchAll()
             let now = Date()
             var keys: Set<String> = []
             for row in rows where row.usage.error == nil && !row.id.hasPrefix("claude/unverified/") {
                 for (index, window) in row.usage.windows.enumerated() {
                     let k = key(row: row, index: index)
                     keys.insert(k)
-                    // Without a source timestamp cswap may be cached: no invented fresh observations.
+                    // Without a source timestamp the data may be cached: no invented fresh observations.
                     guard let at = row.usage.observedAt, at <= now else { continue }
                     history.append(k, UsageSample(at: at, percentLeft: window.percentLeft))
                 }
@@ -467,8 +454,8 @@ final class Store {
         fetched = UsageSnapshot(
             codex: RowUsage(windows: [window("WK", 73, 5 * 1440 + 20 * 60)]),
             claude: [
-                ClaudeAccount(slot: 1, email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/"),
-                ClaudeAccount(slot: 2, email: "work@example.com", usage: RowUsage(windows: [window("WK", 61, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/")
+                ClaudeAccount(profile: "~/.claude", email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/"),
+                ClaudeAccount(profile: "~/.claude-work", email: "work@example.com", usage: RowUsage(windows: [window("WK", 61, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/")
             ], kimi: .notConfigured)
         for (minutesAgo, left) in [(30.0, 61.09), (15.0, 51.545), (0.0, 42.0)] {
             history.append(key(row: rows[1], index: 0), UsageSample(at: now.addingTimeInterval(-minutesAgo * 60), percentLeft: left))

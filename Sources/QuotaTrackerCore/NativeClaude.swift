@@ -1,7 +1,5 @@
 import Foundation
 import CryptoKit
-import Security
-import LocalAuthentication
 
 /// Read-only Claude Code OAuth integration. Parsing/path conventions adapted from CodexBar (MIT).
 /// Never refreshes, persists, logs, or exports credentials; Claude Code owns login and renewal.
@@ -10,7 +8,6 @@ public enum NativeClaude {
         case missing = "not logged in"
         case malformed = "Claude auth unreadable"
         case expired = "expired — log in Claude"
-        case authorization = "authorize in Settings"
         case keychain = "Keychain unavailable"
         case profile = "profile unavailable"
         case unsupportedProfile = "unsupported profile path"
@@ -27,16 +24,44 @@ public enum NativeClaude {
         let file: String
     }
 
+    /// The profile string Claude Code would use for this environment; "" is the default profile.
+    static func environmentProfile(_ environment: [String: String]) -> String {
+        environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] ?? environment["CLAUDE_CONFIG_DIR"] ?? ""
+    }
+
     /// Claude hashes the raw, NFC-normalized profile string, not its resolved filesystem path.
     /// Relative paths are deliberately unsupported: a login item's CWD is not Claude Code's CWD.
     static func location(environment: [String: String], home: String, username: String) throws -> Location {
-        let profile = environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] ?? environment["CLAUDE_CONFIG_DIR"] ?? ""
+        try location(profile: environmentProfile(environment), environment: environment, home: home, username: username)
+    }
+
+    static func location(profile: String, environment: [String: String], home: String, username: String) throws -> Location {
         guard profile.isEmpty || profile.hasPrefix("/") else { throw Failure.unsupportedProfile }
         let suffix = profile.isEmpty ? "" : "-" + SHA256.hash(data: Data(profile.precomposedStringWithCanonicalMapping.utf8))
             .prefix(4).map { String(format: "%02x", $0) }.joined()
         return Location(service: "Claude Code-credentials" + suffix,
                         account: environment["USER"].flatMap { $0.isEmpty ? nil : $0 } ?? username,
                         file: (profile.isEmpty ? home + "/.claude" : profile) + "/.credentials.json")
+    }
+
+    /// Every Claude Code config profile: default first, then the environment's profile and each
+    /// `~/.claude-*` directory containing `.claude.json`, deduped and sorted.
+    static func profiles(environment: [String: String], home: String, entries: [String],
+                         hasConfig: (String) -> Bool) -> [String] {
+        var paths = Set<String>()
+        let env = environmentProfile(environment)
+        if !env.isEmpty { paths.insert(env) }
+        for name in entries where name.hasPrefix(".claude-") {
+            let path = home + "/" + name
+            if hasConfig(path) { paths.insert(path) }
+        }
+        return [""] + paths.sorted()
+    }
+
+    /// Row label telling the user which login a profile is ("~/.claude", "~/.claude-me").
+    static func label(profile: String, home: String) -> String {
+        let path = profile.isEmpty ? home + "/.claude" : profile
+        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
     }
 
     struct Credential {
@@ -60,55 +85,55 @@ public enum NativeClaude {
     }
 
     /// Fallback is permitted only for a genuinely absent Keychain item, never denied/locked/broken auth.
-    static func loadCredential(location: Location, authorize: Bool,
-                               keychain: (Location, Bool) -> Result<Data, Failure>,
+    static func loadCredential(location: Location,
+                               keychain: (Location) -> Result<Data, Failure>,
                                file: (String) -> Result<Data, Failure>) throws -> Credential {
-        let result = keychain(location, authorize)
+        let result = keychain(location)
         if case .failure(.missing) = result { return try credential(file(location.file).get()) }
         return try credential(result.get())
     }
 
     private static let keychainQueue = DispatchQueue(label: "QuotaTracker.claude-keychain", qos: .utility)
+    static let keychainTimeout: TimeInterval = 10
 
-    static func keychainFailure(_ status: OSStatus) -> Failure {
-        switch status {
-        case errSecItemNotFound: .missing
-        case errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled, errSecNoAccessForItem: .authorization
+    /// Maps `security find-generic-password` exit codes; 44 is errSecItemNotFound.
+    static func keychainStatus(exitCode: Int32) -> Failure? {
+        switch exitCode {
+        case 0: nil
+        case 44: .missing
         default: .keychain
         }
     }
 
-    static func keychainQuery(location: Location, authorize: Bool) -> [String: Any] {
-        let context = LAContext()
-        context.interactionNotAllowed = !authorize
-        return [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: location.service,
-         kSecAttrAccount as String: location.account,
-         kSecMatchLimit as String: kSecMatchLimitOne,
-         kSecReturnData as String: true,
-         kSecUseAuthenticationContext as String: context]
-    }
-
-    /// The legacy login Keychain still needs its documented process-level switch (CodexBar's
-    /// KeychainLegacyInteraction). Resolve it dynamically because Apple deprecated the legacy API.
-    private static func setInteractionAllowed(_ allowed: Bool) -> OSStatus {
-        typealias SetInteraction = @convention(c) (DarwinBoolean) -> OSStatus
-        guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY | RTLD_NOLOAD) else { return errSecNotAvailable }
-        defer { dlclose(handle) }
-        guard let symbol = dlsym(handle, "SecKeychainSetUserInteractionAllowed") else { return errSecNotAvailable }
-        return unsafeBitCast(symbol, to: SetInteraction.self)(DarwinBoolean(allowed))
-    }
-
-    private static func readKeychain(_ location: Location, authorize: Bool) -> Result<Data, Failure> {
-        // Legacy login-keychain ACL dialogs can ignore the per-query no-UI flag. Serialize our only
-        // Security.framework reader and disable process-wide interaction unless the user just asked.
-        // No ACL changes or access-control bypass: without approval, reads fail and show Settings retry.
-        guard setInteractionAllowed(authorize) == errSecSuccess else { return .failure(.keychain) }
-        defer { _ = setInteractionAllowed(false) }
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(keychainQuery(location: location, authorize: authorize) as CFDictionary, &item)
-        guard status == errSecSuccess else { return .failure(keychainFailure(status)) }
-        guard let data = item as? Data, data.count <= 1_048_576 else { return .failure(.malformed) }
+    /// Claude Code writes its items with /usr/bin/security, so that tool is on their ACL and reads
+    /// them silently, unlike this ad-hoc-signed app whose identity changes on every rebuild.
+    private static func readKeychain(_ location: Location) -> Result<Data, Failure> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", location.service, "-a", location.account, "-w"]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        let done = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in done.signal() }
+        do { try process.run() } catch { return .failure(.keychain) }
+        var data = Data()
+        let reader = DispatchGroup()
+        reader.enter()
+        DispatchQueue.global(qos: .utility).async {
+            data = (try? stdout.fileHandleForReading.read(upToCount: 1_048_578)) ?? Data()
+            reader.leave()
+        }
+        if done.wait(timeout: .now() + keychainTimeout) == .timedOut {
+            process.terminate()
+            _ = done.wait(timeout: .now() + 1)
+            return .failure(.timeout)
+        }
+        _ = reader.wait(timeout: .now() + 1)
+        if let failure = keychainStatus(exitCode: process.terminationStatus) { return .failure(failure) }
+        if data.last == UInt8(ascii: "\n") { data.removeLast() }
+        guard data.count <= 1_048_576 else { return .failure(.malformed) }
         return .success(data)
     }
 
@@ -123,14 +148,13 @@ public enum NativeClaude {
         }
     }
 
-    private static func load(authorize: Bool) async -> Result<Credential, Failure> {
+    private static func load(profile: String) async -> Result<Credential, Failure> {
         await withCheckedContinuation { continuation in
             keychainQueue.async {
                 do {
-                    let location = try location(environment: ProcessInfo.processInfo.environment,
+                    let location = try location(profile: profile, environment: ProcessInfo.processInfo.environment,
                                                 home: NSHomeDirectory(), username: NSUserName())
-                    let credential = try loadCredential(location: location, authorize: authorize,
-                                                        keychain: readKeychain, file: readFile)
+                    let credential = try loadCredential(location: location, keychain: readKeychain, file: readFile)
                     continuation.resume(returning: .success(credential))
                 } catch { continuation.resume(returning: .failure(error as? Failure ?? .malformed)) }
             }
@@ -144,9 +168,9 @@ public enum NativeClaude {
         let organization: Organization
     }
 
-    static func account(profile data: Data, usage: RowUsage) throws -> ClaudeAccount {
+    static func account(profile data: Data, usage: RowUsage, label: String = "~/.claude") throws -> ClaudeAccount {
         guard let profile = try? JSONDecoder().decode(Profile.self, from: data) else { throw Failure.profile }
-        return ClaudeAccount(slot: 1, email: profile.account.email ?? "Claude Code", usage: usage,
+        return ClaudeAccount(profile: label, email: profile.account.email ?? "Claude Code", usage: usage,
                              id: "claude/\(profile.account.uuid.uuidString.lowercased())/\(profile.organization.uuid.uuidString.lowercased())")
     }
 
@@ -211,29 +235,63 @@ public enum NativeClaude {
         catch { throw (error as? URLError)?.code == .timedOut ? Failure.timeout : Failure.network }
     }
 
-    static func fetch(credential: Result<Credential, Failure>,
+    static func fetch(credential: Result<Credential, Failure>, label: String = "~/.claude",
                       transport: (URLRequest) async throws -> Data) async -> [ClaudeAccount] {
         do {
             let credential = try credential.get()
             // The same token authenticates profile and usage. Never trust ~/.claude.json attribution.
             let profile = try await transport(request("profile", credential: credential))
-            var account = try account(profile: profile, usage: RowUsage())
+            var account = try account(profile: profile, usage: RowUsage(), label: label)
             do { account.usage = try usage(await transport(request("usage", credential: credential))) }
-            catch { account.usage = failure(error as? Failure ?? .network).usage }
+            catch { account.usage = failure(error as? Failure ?? .network, label: label).usage }
             return [account]
         } catch {
             let failure = error as? Failure ?? .network
-            return failure == .missing ? [] : [self.failure(failure)]
+            return failure == .missing ? [] : [self.failure(failure, label: label)]
         }
     }
 
-    private static func failure(_ error: Failure) -> ClaudeAccount {
-        var usage = RowUsage.failure(error.rawValue)
-        usage.needsClaudeAuthorization = error == .authorization || error == .keychain
-        return ClaudeAccount(slot: 0, email: "Claude Code", usage: usage)
+    private static func failure(_ error: Failure, label: String) -> ClaudeAccount {
+        ClaudeAccount(profile: label, email: label, usage: .failure(error.rawValue))
     }
 
-    public static func fetch(authorize: Bool = false) async -> [ClaudeAccount] {
-        await fetch(credential: load(authorize: authorize), transport: send)
+    /// Profile order is kept; a verified account seen in several profiles keeps one row,
+    /// preferring a successful one. Unverified (failure) rows are always kept.
+    static func merge(_ rows: [[ClaudeAccount]]) -> [ClaudeAccount] {
+        var result: [ClaudeAccount] = []
+        for account in rows.joined() {
+            guard let id = account.id, let index = result.firstIndex(where: { $0.id == id }) else {
+                result.append(account); continue
+            }
+            if result[index].usage.error != nil && account.usage.error == nil { result[index] = account }
+        }
+        return result
+    }
+
+    /// Keychain reads stay serialized on keychainQueue; network fetches run concurrently.
+    static func fetch(profiles: [String], home: String,
+                      load: @escaping @Sendable (String) async -> Result<Credential, Failure>,
+                      transport: @escaping @Sendable (URLRequest) async throws -> Data) async -> [ClaudeAccount] {
+        let rows = await withTaskGroup(of: (Int, [ClaudeAccount]).self) { group in
+            for (index, profile) in profiles.enumerated() {
+                group.addTask {
+                    (index, await fetch(credential: load(profile), label: label(profile: profile, home: home), transport: transport))
+                }
+            }
+            var rows = [[ClaudeAccount]](repeating: [], count: profiles.count)
+            for await (index, accounts) in group { rows[index] = accounts }
+            return rows
+        }
+        return merge(rows)
+    }
+
+    public static func fetch() async -> [ClaudeAccount] {
+        let home = NSHomeDirectory()
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: home)) ?? []
+        let list = profiles(environment: ProcessInfo.processInfo.environment, home: home, entries: entries) {
+            FileManager.default.fileExists(atPath: $0 + "/.claude.json")
+        }
+        return await fetch(profiles: list, home: home, load: { await load(profile: $0) },
+                           transport: { try await send($0) })
     }
 }

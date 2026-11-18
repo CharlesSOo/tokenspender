@@ -27,6 +27,11 @@ final class DirectSourcesTests: XCTestCase {
         XCTAssertEqual(row.error, "No usage windows")
     }
 
+    func testCodexFreePlanIsHidden() {
+        let row = DirectSources.parseCodex(Data(#"{"plan_type":"free","rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":2592000}}}"#.utf8))
+        XCTAssertFalse(row.isConfigured)
+    }
+
     func testKimiUsageMapping() throws {
         let row = DirectSources.parseKimi(try fixture("kimi-code-usages"))
         XCTAssertNil(row.error)

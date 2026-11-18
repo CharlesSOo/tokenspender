@@ -7,10 +7,10 @@ final class AccountSelectionTests: XCTestCase {
         let fiveHour = UsageWindow(label: "5H", percentLeft: 10, resetsAt: nil)
         let weekly = UsageWindow(label: "WK", percentLeft: 60, resetsAt: nil)
         let snapshot = UsageSnapshot(claude: [
-            ClaudeAccount(slot: 1, email: "ultra@example.com", usage: RowUsage(windows: [fiveHour, weekly]), id: "claude/ultra"),
-            ClaudeAccount(slot: 2, email: "max@example.com", usage: RowUsage(windows: [fiveHour, weekly]), id: "claude/max"),
-            ClaudeAccount(slot: 3, email: "only@example.com", usage: RowUsage(windows: [fiveHour]), id: "claude/only"),
-            ClaudeAccount(slot: 4, email: "unverified@example.com", usage: RowUsage(windows: [fiveHour, weekly]))
+            ClaudeAccount(profile: "~/.claude", email: "ultra@example.com", usage: RowUsage(windows: [fiveHour, weekly]), id: "claude/ultra"),
+            ClaudeAccount(profile: "~/.claude-b", email: "max@example.com", usage: RowUsage(windows: [fiveHour, weekly]), id: "claude/max"),
+            ClaudeAccount(profile: "~/.claude-c", email: "only@example.com", usage: RowUsage(windows: [fiveHour]), id: "claude/only"),
+            ClaudeAccount(profile: "~/.claude-d", email: "unverified@example.com", usage: RowUsage(windows: [fiveHour, weekly]))
         ])
         let result = snapshot.withoutFiveHour(accounts: ["claude/ultra", "claude/only"])
         XCTAssertEqual(result.claude.map { $0.usage.windows.map(\.label) }, [["WK"], ["5H", "WK"], ["5H"], ["5H", "WK"]])
@@ -23,19 +23,11 @@ final class AccountSelectionTests: XCTestCase {
     private let second = "00000000-0000-0000-0000-000000000002"
     private let org = "00000000-0000-0000-0000-000000000003"
 
-    private func list(_ entries: [(Int, String, String, Double)]) -> Data {
-        let accounts: [[String: Any]] = entries.map { slot, email, org, used in
-            ["number": slot, "email": email, "organizationUuid": org,
-             "usageStatus": "ok", "usage": ["fiveHour": ["pct": used], "sevenDay": ["pct": 20]]]
-        }
-        return try! JSONSerialization.data(withJSONObject: ["accounts": accounts])
-    }
-
-    private func metadata(_ entries: [(Int, String, String, String)]) -> Data {
-        let accounts = Dictionary(uniqueKeysWithValues: entries.map { slot, email, uuid, org in
-            (String(slot), ["email": email, "uuid": uuid, "organizationUuid": org])
-        })
-        return try! JSONSerialization.data(withJSONObject: ["accounts": accounts])
+    private func account(_ profile: String, _ email: String, _ uuid: String, _ used: Double) -> ClaudeAccount {
+        ClaudeAccount(profile: profile, email: email,
+                      usage: RowUsage(windows: [UsageWindow(label: "5H", percentLeft: 100 - used, resetsAt: nil),
+                                                UsageWindow(label: "WK", percentLeft: 80, resetsAt: nil)]),
+                      id: "claude/\(uuid)/\(org)")
     }
 
     private func snapshot(_ accounts: [ClaudeAccount]) -> UsageSnapshot {
@@ -43,8 +35,7 @@ final class AccountSelectionTests: XCTestCase {
     }
 
     private func pair() -> [ClaudeAccount] {
-        Parse.cswap(list([(1, "a@example.com", org, 80), (2, "b@example.com", org, 30)]),
-                    metadata: metadata([(1, "a@example.com", first, org), (2, "b@example.com", second, org)]))!
+        [account("~/.claude", "a@example.com", first, 80), account("~/.claude-me", "b@example.com", second, 30)]
     }
 
     func testTwoAccountsShareOrganizationButRemainIndependentlySelectable() throws {
@@ -72,21 +63,17 @@ final class AccountSelectionTests: XCTestCase {
         XCTAssertEqual(DisplaySelection.mode(.claudePool).text(snapshot: snapshot(accounts)), "20%")
     }
 
-    func testRenameAndSlotReorderRetainIdentity() throws {
+    func testRenameAndProfileMoveRetainIdentity() throws {
         let selected = DisplaySelection.claudeAccount(try XCTUnwrap(pair()[0].id))
-        let reordered = try XCTUnwrap(Parse.cswap(
-            list([(1, "b@example.com", org, 30), (9, "renamed@example.com", org, 90)]),
-            metadata: metadata([(1, "b@example.com", second, org), (9, "renamed@example.com", first, org)])))
-        XCTAssertEqual(selected.text(snapshot: snapshot(reordered)), "10%")
-        XCTAssertEqual(selected.title(snapshot: snapshot(reordered)), "Claude: renamed@example.com")
-        XCTAssertEqual(reordered[1].id, pair()[0].id)
+        let moved = [account("~/.claude", "b@example.com", second, 30), account("~/.claude-me", "renamed@example.com", first, 90)]
+        XCTAssertEqual(selected.text(snapshot: snapshot(moved)), "10%")
+        XCTAssertEqual(selected.title(snapshot: snapshot(moved)), "Claude: renamed@example.com")
     }
 
-    func testDisappearanceReappearanceAndSlotReuseNeverSelectAnotherAccount() throws {
+    func testDisappearanceAndReplacementNeverSelectAnotherAccount() throws {
         let accounts = pair()
         let selected = DisplaySelection.claudeAccount(try XCTUnwrap(accounts[0].id))
-        let replacement = try XCTUnwrap(Parse.cswap(list([(1, "b@example.com", org, 30)]),
-            metadata: metadata([(1, "b@example.com", second, org)])))
+        let replacement = [account("~/.claude", "b@example.com", second, 30)]
         XCTAssertEqual(selected.text(snapshot: snapshot(replacement)), "—")
         let choices = DisplaySelection.choices(snapshot: snapshot(replacement), selected: selected)
         XCTAssertEqual(choices.last?.selection, selected)
@@ -116,29 +103,13 @@ final class AccountSelectionTests: XCTestCase {
         XCTAssertNil(DisplaySelection(rawValue: "not-a-selection"))
     }
 
-    func testIdentityMetadataMissingCorruptMismatchedOrAmbiguousFailsClosed() throws {
-        let data = list([(1, "a@example.com", org, 80)])
-        let invalid: [Data?] = [nil, Data("invalid".utf8), Data("{}".utf8),
-            metadata([(1, "wrong@example.com", first, org)]),
-            metadata([(1, "a@example.com", first, second)]),
-            metadata([(2, "a@example.com", first, org)]),
-            metadata([(1, "a@example.com", "", org)]),
-            metadata([(1, "a@example.com", first, org), (2, "b@example.com", first, org)])]
-        for meta in invalid {
-            let accounts = try XCTUnwrap(Parse.cswap(data, metadata: meta))
-            XCTAssertNil(accounts[0].id)
-            XCTAssertEqual(DisplaySelection.mode(.claudePool).text(snapshot: snapshot(accounts)), "20%")
-            XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot(accounts), selected: .mode(.claudePool)).count, 4)
-        }
-        let duplicateSlots = try XCTUnwrap(Parse.cswap(list([(1, "a@example.com", org, 80), (1, "a@example.com", org, 30)]),
-            metadata: metadata([(1, "a@example.com", first, org)])))
-        XCTAssertTrue(duplicateSlots.allSatisfy { $0.id == nil })
-    }
-
-    func testSameAccountAcrossOrganizationsHasDistinctIdentity() throws {
-        let accounts = try XCTUnwrap(Parse.cswap(list([(1, "a@example.com", org, 80), (2, "a@example.com", second, 30)]),
-            metadata: metadata([(1, "a@example.com", first, org), (2, "a@example.com", first, second)])))
-        XCTAssertNotNil(accounts[0].id)
-        XCTAssertNotEqual(accounts[0].id, accounts[1].id)
+    func testUnverifiedRowsArePooledButNotPinnableAndSameEmailShowsProfile() {
+        let failed = ClaudeAccount(profile: "~/.claude", email: "~/.claude", usage: .failure("expired"))
+        let unverified = ClaudeAccount(profile: "~/.claude-x", email: "x@example.com", usage: RowUsage(windows: [UsageWindow(label: "WK", percentLeft: 20, resetsAt: nil)]))
+        XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot([failed, unverified]), selected: .mode(.claudePool)).count, 4)
+        XCTAssertEqual(DisplaySelection.mode(.claudePool).text(snapshot: snapshot([failed, unverified])), "20%")
+        let twins = [account("~/.claude", "a@example.com", first, 80), account("~/.claude-me", "a@example.com", second, 30)]
+        XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot(twins), selected: .mode(.claudePool)).suffix(2).map(\.title),
+                       ["Claude: a@example.com (~/.claude) — pinned", "Claude: a@example.com (~/.claude-me) — pinned"])
     }
 }

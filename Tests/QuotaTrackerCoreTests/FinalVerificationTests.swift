@@ -1,6 +1,5 @@
 import Foundation
 import XCTest
-import Darwin
 @testable import QuotaTrackerCore
 
 final class FinalVerificationTests: XCTestCase {
@@ -41,21 +40,5 @@ final class FinalVerificationTests: XCTestCase {
         let resettingLater = RowUsage(windows: [UsageWindow(label: "5H", percentLeft: 70, resetsAt: now.addingTimeInterval(eta + 1))])
         XCTAssertNotNil(BurnRate.label(usage: resettingLater, history: { _ in accepted }, now: now))
         XCTAssertNil(BurnRate.label(usage: resettingLater, history: { _ in accepted }, now: now.addingTimeInterval(901)))
-    }
-
-    func testSuccessKillsDetachedOutputDescendantBeforeReaping() async throws {
-        let file = NSTemporaryDirectory() + UUID().uuidString
-        defer { try? FileManager.default.removeItem(atPath: file) }
-        let output = await Fetcher.run("/bin/sh", ["-c", "sleep 1; (sleep 0.5; echo survived > '\(file)') >/dev/null 2>&1 & printf done"], timeout: 3)
-        XCTAssertEqual(output, Data("done".utf8))
-        try await Task.sleep(nanoseconds: 800_000_000)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: file), "Successful parent exit must kill its group even if descendant closes stdout")
-    }
-
-    func testEOFStillHonorsChildDeadline() async {
-        let start = Date()
-        let result = await Fetcher.run("/bin/sh", ["-c", "exec 1>&-; trap '' TERM; sleep 20"], timeout: 0.15)
-        XCTAssertNil(result)
-        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
     }
 }

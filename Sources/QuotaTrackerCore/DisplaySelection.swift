@@ -71,7 +71,7 @@ public enum DisplaySelection: Equatable, Sendable, RawRepresentable {
             let selection = DisplaySelection.claudeAccount(id)
             let suffix = account.usage.error.map { " (\($0))" } ?? ""
             let label = snapshot.claude.filter { $0.email == account.email && $0.usage.isConfigured }.count > 1
-                ? "\(account.email) (slot \(account.slot))" : account.email
+                ? "\(account.email) (\(account.profile))" : account.email
             choices.append(Choice(selection: selection, title: "Claude: \(label) — pinned\(suffix)", enabled: true))
         }
         if case .claudeAccount = selected, !choices.contains(where: { $0.selection == selected }) {

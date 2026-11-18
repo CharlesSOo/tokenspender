@@ -26,4 +26,4 @@ SOFTWARE.
 
 ## Runtime integration
 
-[claude-swap](https://github.com/realiti4/claude-swap) is an optional, separately installed integration invoked for configured managed Claude accounts; a native single Claude Code login does not require it. It is not bundled. Provider names and referenced products belong to their respective owners; this project is not endorsed by them.
+Provider names and referenced products belong to their respective owners; this project is not endorsed by them.

@@ -20,8 +20,6 @@ public struct RowUsage: Equatable, Sendable {
     /// Source observation time, not the time a cached response was read.
     public var observedAt: Date?
     public var identity: String?
-    /// Native Claude Keychain needs an explicit user-initiated authorization/retry.
-    public var needsClaudeAuthorization = false
 
     /// The window with the least left.
     public var constraining: UsageWindow? { windows.min { $0.percentLeft < $1.percentLeft } }
@@ -37,23 +35,24 @@ public struct RowUsage: Equatable, Sendable {
     public static let notConfigured = RowUsage(error: "not configured", isConfigured: false)
 }
 
-/// One managed or native Claude account. `slot` orders managed rows; `email` is only a display name.
+/// One Claude Code config profile's account. `profile` is the config dir label (e.g. "~/.claude-me");
+/// `email` is only a display name.
 public struct ClaudeAccount: Equatable, Sendable {
-    public let slot: Int
+    public let profile: String
     public let email: String
     public var usage: RowUsage
-    /// Account UUID + organization UUID from cswap metadata or native OAuth profile; nil if unverified.
+    /// Account UUID + organization UUID from the native OAuth profile; nil if unverified.
     public let id: String?
 
-    public init(slot: Int, email: String, usage: RowUsage, id: String? = nil) {
-        self.slot = slot
+    public init(profile: String, email: String, usage: RowUsage, id: String? = nil) {
+        self.profile = profile
         self.email = email
         self.usage = usage
         self.id = id
     }
 }
 
-/// One fetch of every provider. Claude comes from managed cswap accounts or one native login, never both.
+/// One fetch of every provider. Claude has one row per Claude Code config profile.
 public struct UsageSnapshot: Equatable, Sendable {
     public var codex: RowUsage
     public var claude: [ClaudeAccount]
@@ -65,7 +64,7 @@ public struct UsageSnapshot: Equatable, Sendable {
         self.kimi = kimi
     }
 
-    /// Claude usages with credentials (hidden slots excluded).
+    /// Claude usages with credentials (hidden profiles excluded).
     public var claudeUsages: [RowUsage] { claude.map(\.usage).filter(\.isConfigured) }
 
     /// Claude's usage API can keep reporting a 5H window for plans that no longer enforce one, and
@@ -226,89 +225,11 @@ public enum BurnRate {
 }
 
 public enum Parse {
-    private struct CSList: Decodable {
-        struct Window: Decodable {
-            let pct: Double?
-            let resetsAt: String?
-        }
-        struct Usage: Decodable {
-            let fiveHour: Window?
-            let sevenDay: Window?
-        }
-        struct Account: Decodable {
-            let number: Int?
-            let email: String
-            let organizationUuid: String?
-            let usageStatus: String?
-            let usageFetchedAt: String?
-            let usage: Usage?
-        }
-        let accounts: [Account]
-    }
-
-
-    /// Identity-only projection of cswap's sequence.json, never its credential backups.
-    private struct CSSequence: Decodable {
-        struct Account: Decodable {
-            let email: String
-            let uuid: String
-            let organizationUuid: String?
-
-            var id: String? {
-                guard let account = UUID(uuidString: uuid) else { return nil }
-                let org = organizationUuid ?? ""
-                guard org.isEmpty || UUID(uuidString: org) != nil else { return nil }
-                return "claude/\(account.uuidString.lowercased())/\(org.lowercased())"
-            }
-        }
-        let accounts: [String: Account]
-    }
-
-    /// Slots sort the UI, never identify a selection. A missing/inconsistent metadata join leaves
-    /// usage visible in the pool but cannot be pinned. Duplicate identities also fail closed.
-    public static func cswap(_ data: Data, metadata: Data? = nil) -> [ClaudeAccount]? {
-        guard let list = try? JSONDecoder().decode(CSList.self, from: data) else { return nil }
-        let sequence = metadata.flatMap { try? JSONDecoder().decode(CSSequence.self, from: $0) }
-        let identities = sequence?.accounts.values.compactMap(\.id) ?? []
-        return list.accounts.compactMap { a -> ClaudeAccount? in
-            guard let slot = a.number else { return nil }
-            var id: String?
-            if let record = sequence?.accounts[String(slot)], record.email == a.email,
-               (record.organizationUuid ?? "").lowercased() == (a.organizationUuid ?? "").lowercased(),
-               let candidate = record.id,
-               identities.filter({ $0 == candidate }).count == 1,
-               list.accounts.filter({ $0.number == slot }).count == 1 {
-                id = candidate
-            }
-            return ClaudeAccount(slot: slot, email: a.email, usage: cswapUsage(a), id: id)
-        }.sorted { $0.slot < $1.slot }
-    }
-
-    private static func cswapUsage(_ account: CSList.Account) -> RowUsage {
-        if let status = account.usageStatus, status != "ok" { return cswapStatus(status) }
-        guard let usage = account.usage else { return cswapStatus(account.usageStatus ?? "unavailable") }
-        let windows = [("5H", usage.fiveHour), ("WK", usage.sevenDay)].compactMap { label, w -> UsageWindow? in
-            guard let w, let pct = w.pct else { return nil }
-            return UsageWindow(label: label, percentLeft: left(pct), resetsAt: w.resetsAt.flatMap(date))
-        }
-        return windows.isEmpty ? .failure("No usage windows") : RowUsage(windows: windows, observedAt: account.usageFetchedAt.flatMap(date))
-    }
-
-    /// cswap `usageStatus` other than `ok`, mapped to the same quiet states the other providers use:
-    /// `token_expired`/`relogin_required` → "expired", `no_credentials` → hidden, anything else → "unavailable".
-    static func cswapStatus(_ status: String) -> RowUsage {
-        switch status {
-        case "token_expired", "relogin_required": return .failure("expired")
-        case "no_credentials": return .notConfigured
-        default: return .failure("unavailable")
-        }
-    }
-
     // MARK: helpers
 
     static func left(_ used: Double) -> Double { min(100, max(0, 100 - used)) }
 
-    /// ISO 8601 with optional fractional seconds (cswap emits microseconds and `+00:00`).
+    /// ISO 8601 with optional fractional seconds (microseconds and `+00:00` accepted).
     static func date(_ s: String) -> Date? {
         let plain = ISO8601DateFormatter()
         if let d = plain.date(from: s) { return d }

@@ -1,14 +1,14 @@
 # Account selection integration
 
-## Source selection
+## Claude Code profiles
 
-- Missing `~/.claude-swap-backup/sequence.json`, or a valid file with an empty `accounts` object: use native Claude Code. cswap need not be installed and is not invoked.
-- Nonempty managed `accounts`: keep `cswap list --json`. Do not add the native current account to the pool again.
-- Unreadable/malformed managed metadata, a missing/broken cswap executable, malformed/empty managed output, or managed authentication failures: show the managed error. Never silently fall back to another login.
+QuotaTracker shows one Claude row per Claude Code config profile:
 
-Deleting a managed account is a cswap operation, not a display-selection operation. Once no managed accounts remain, native discovery resumes.
+- the default profile (`CLAUDE_CONFIG_DIR` unset: `~/.claude`, `~/.claude.json`);
+- QuotaTracker's own `CLAUDE_SECURESTORAGE_CONFIG_DIR` / `CLAUDE_CONFIG_DIR`, if set;
+- every `~/.claude-*` directory containing a `.claude.json` file (e.g. `~/.claude-me`, used via `CLAUDE_CONFIG_DIR=~/.claude-me`).
 
-## Native Claude Code: no cswap required
+Paths are deduped; the default comes first, then the others sorted. A profile with no credentials (no Keychain item and no `.credentials.json`) is skipped. Any other failure shows a row labeled with the profile (e.g. `~/.claude-me`) so you know which login to fix. If two profiles are signed into the same account, one row is shown, preferring a successful fetch. Keychain reads are serialized; network fetches run concurrently.
 
 Sign in normally through Claude Code. QuotaTracker reads the exact OAuth credential item for that profile using Apple's Security framework, without writing, exporting, refreshing, changing Keychain ACLs, or starting a new login system. Only `claudeAiOauth.accessToken` and millisecond `expiresAt` are decoded; refresh tokens and unrelated entries are not decoded or used. The credential JSON and access token remain in memory for the fetch, never preferences, caches, logs, or diagnostics.
 
@@ -16,9 +16,9 @@ Sign in normally through Claude Code. QuotaTracker reads the exact OAuth credent
 
 The default macOS generic-password service is `Claude Code-credentials`, with the OS username (`USER` when present) as its account. For a nonempty configured profile, the service suffix is `-` plus the first eight hex characters of SHA-256 of the **raw NFC-normalized path string**. Trailing slashes and other textual differences are significant; do not resolve the path before hashing.
 
-`CLAUDE_SECURESTORAGE_CONFIG_DIR`, when defined, takes precedence over `CLAUDE_CONFIG_DIR`. An explicitly empty secure-storage variable selects the default store. Otherwise, an empty/unset config variable uses the default. Set these in the environment of **QuotaTracker itself** when monitoring a non-default profile; shell-only settings are not automatically inherited by a login-item app. Absolute profile paths are supported. Relative paths (including literal `~/…`) show **unsupported profile path** rather than risking another process's working-directory interpretation. An explicit profile never falls back to the default Keychain item.
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, when defined, takes precedence over `CLAUDE_CONFIG_DIR`. An explicitly empty secure-storage variable selects the default store. Otherwise, an empty/unset config variable uses the default. Profiles outside `~/.claude-*` need these set in the environment of **QuotaTracker itself**; shell-only settings are not automatically inherited by a login-item app. Absolute profile paths are supported. Relative paths (including literal `~/…`) show **unsupported profile path** rather than risking another process's working-directory interpretation. A non-default profile never falls back to the default Keychain item.
 
-Only a genuinely absent Keychain item permits reading `.credentials.json` in the same selected secure-storage directory (default `~/.claude/.credentials.json`). Locked/denied/unavailable Keychain states and malformed/expired present credentials never trigger a fallback to a potentially stale file. File reads are bounded to 1 MiB. Missing OAuth credentials hide Claude; malformed credentials remain visible. API-key, setup-token environment overrides, and third-party OAuth sources are not native subscription-login sources for this integration.
+Only a genuinely absent Keychain item permits reading `.credentials.json` in the same selected secure-storage directory (default `~/.claude/.credentials.json`). Each profile is read independently. Locked/denied/unavailable Keychain states and malformed/expired present credentials never trigger a fallback to a potentially stale file. File reads are bounded to 1 MiB. Missing OAuth credentials hide Claude; malformed credentials remain visible. API-key, setup-token environment overrides, and third-party OAuth sources are not native subscription-login sources for this integration.
 
 ### Consent and expiry
 
@@ -30,36 +30,14 @@ Expired credentials or HTTP 401 say **expired — log in Claude**. Renew/sign in
 
 ### Verified identity and quota
 
-Using the **same access token**, GET `https://api.anthropic.com/api/oauth/profile`, require valid `account.uuid` and `organization.uuid`, then GET `/api/oauth/usage`. No identity is trusted from `~/.claude.json`, email labels, token hashes, or cached account metadata. A missing/unreadable profile fails closed: no quota is attributed to a guessed account. The stable pin key is account UUID + organization UUID, matching managed identity semantics.
+Using the **same access token**, GET `https://api.anthropic.com/api/oauth/profile`, require valid `account.uuid` and `organization.uuid`, then GET `/api/oauth/usage`. No identity is trusted from `~/.claude.json`, email labels, token hashes, or cached account metadata. A missing/unreadable profile fails closed: no quota is attributed to a guessed account. The stable pin key is account UUID + organization UUID.
 
 Usage maps `five_hour` / `seven_day` utilization and reset timestamps; the menu-bar percentage is the minimum remaining quota across those windows. Headers use OAuth beta `oauth-2025-04-20` and the established `claude-code/2.1.0` compatibility user-agent. Provider bodies are never displayed as errors. HTTP 403/429 and network/timeouts show explicit quiet errors. Requests use an ephemeral, cache/cookie-free URLSession, 20-second request/resource deadlines, and reject redirects. There is no extra credential cache or history scan; two small read-only requests run per normal five-minute native refresh.
 
-Conventions were checked against installed Claude Code 2.1.294 constants, maintained CodexBar `ClaudeConfigPaths`, `ClaudeOAuthCredentialModels`, `ClaudeOAuthUsageFetcher`, `KeychainSecurity`, and installed cswap profile/keychain source. Adapted CodexBar code is MIT-licensed; see `THIRD_PARTY_NOTICES.md`. No real credentials, Keychain consent, or provider calls were used during automated validation.
-
-## Managed Claude identity
-
-Usage remains `cswap list --json` schema v1. Its mutable `number` controls UI order and `email` is only a label/join check. Neither is persisted as identity: cswap supports moving/swapping slots.
-
-The list schema does not expose account UUID. QuotaTracker reads only the identity projection of macOS cswap's `~/.claude-swap-backup/sequence.json`:
-
-```json
-{
-  "accounts": {
-    "1": {
-      "email": "you@example.com",
-      "uuid": "00000000-0000-0000-0000-000000000001",
-      "organizationUuid": "00000000-0000-0000-0000-000000000002"
-    }
-  }
-}
-```
-
-Account UUID + organization UUID distinguishes both multiple people in a shared organization and one person across organizations. Empty managed organization means personal identity. Duplicate/invalid identities or mismatched slot/email/organization leave that fetched row unpinnable; its usage stays in the pool/popover. Unverified rows do not accumulate burn-rate history. Metadata is read before invoking cswap; concurrent reconfiguration can temporarily make a pin unavailable until the next consistent refresh. No backup credentials are read directly by QuotaTracker.
-
-This depends on cswap's metadata schema as well as its JSON output, verified against `json_output.account_row`, `models.AccountInfo`, `paths.get_backup_root`, and `ClaudeAccountSwitcher.sequence_file`. cswap still owns its own credential lifecycle.
+Conventions were checked against installed Claude Code 2.1.294 constants, maintained CodexBar `ClaudeConfigPaths`, `ClaudeOAuthCredentialModels`, `ClaudeOAuthUsageFetcher`, `KeychainSecurity`. Adapted CodexBar code is MIT-licensed; see `THIRD_PARTY_NOTICES.md`. No real credentials, Keychain consent, or provider calls were used during automated validation.
 
 ## Display semantics and verification
 
 Selection changes only the menu-bar display. Missing pins stay checked as unavailable in Settings, persist through refresh/relaunch, and recover when the same identity returns. All configured bars stay visible. A single Claude account has one pin and one pool choice: equal current percentages but different future-membership semantics. Existing AppKit visuals, accessibility, animations, and original-size critter remain unchanged. These percentages are quota estimates, not comparable token quantities.
 
-`swift test` covers native-only/no-cswap routing, managed precedence without duplicate native rows, no error fallback, credential parsing, profile isolation, consent query policy, API failures, verified identity, weekly exhaustion, and prior pool/pin cases using synthetic fixtures. `swift build -c release` checks AppKit integration. Tests do not query the real Keychain or providers. Privacy-safe demo renders use `QUOTATRACKER_DEMO=1` and a private temporary snapshot directory; do not install the test build.
+`swift test` covers profile discovery and keychain-service hashing, one row per profile with missing profiles skipped and failures labeled, duplicate-account merging, credential parsing, profile isolation, consent query policy, API failures, verified identity, weekly exhaustion, and prior pool/pin cases using synthetic fixtures. `swift build -c release` checks AppKit integration. Tests do not query the real Keychain or providers. Privacy-safe demo renders use `QUOTATRACKER_DEMO=1` and a private temporary snapshot directory; do not install the test build.

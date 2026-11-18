@@ -1,5 +1,4 @@
 import Foundation
-import Security
 import XCTest
 @testable import QuotaTrackerCore
 
@@ -32,27 +31,15 @@ final class StandaloneVerificationTests: XCTestCase {
 
     func testFileFallbackFailuresStayDistinctAndNeverTryAnotherProfile() throws {
         let location = try NativeClaude.location(environment: ["CLAUDE_CONFIG_DIR": "/synthetic/work"], home: "/synthetic/home", username: "example")
-        for failure in [NativeClaude.Failure.missing, .malformed, .authorization] {
+        for failure in [NativeClaude.Failure.missing, .malformed, .keychain] {
             var reads = 0
-            XCTAssertThrowsError(try NativeClaude.loadCredential(location: location, authorize: false, keychain: { _, _ in .failure(.missing) }, file: { path in
+            XCTAssertThrowsError(try NativeClaude.loadCredential(location: location, keychain: { _ in .failure(.missing) }, file: { path in
                 reads += 1
                 XCTAssertEqual(path, "/synthetic/work/.credentials.json")
                 return .failure(failure)
             })) { XCTAssertEqual($0 as? NativeClaude.Failure, failure) }
             XCTAssertEqual(reads, 1)
         }
-    }
-
-    func testExactKeychainQueryAndMissingVersusUnavailableStatus() throws {
-        let location = try NativeClaude.location(environment: [:], home: "/synthetic", username: "example")
-        let query = NativeClaude.keychainQuery(location: location, authorize: false)
-        XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
-        XCTAssertEqual(query[kSecReturnData as String] as? Bool, true)
-        XCTAssertNil(query[kSecReturnAttributes as String])
-        XCTAssertNil(query[kSecMatchItemList as String])
-        XCTAssertEqual(NativeClaude.keychainFailure(errSecNotAvailable), .keychain)
-        XCTAssertEqual(NativeClaude.keychainFailure(errSecDecode), .keychain)
-        XCTAssertEqual(NativeClaude.keychainFailure(errSecItemNotFound), .missing)
     }
 
     func testProfileFailuresDoNotIssueUsageOrExposeTransportMessages() async {
@@ -96,7 +83,7 @@ final class StandaloneVerificationTests: XCTestCase {
         let first = try NativeClaude.account(profile: profile(), usage: usage)
         let pin = DisplaySelection.claudeAccount(try XCTUnwrap(first.id))
         XCTAssertEqual(pin.text(snapshot: snapshot([first])), "35%")
-        for failure in [NativeClaude.Failure.missing, .expired, .authorization, .malformed] {
+        for failure in [NativeClaude.Failure.missing, .expired, .keychain, .malformed] {
             let accounts = await NativeClaude.fetch(credential: .failure(failure)) { _ in XCTFail("No request"); return Data() }
             XCTAssertEqual(pin.text(snapshot: snapshot(accounts)), "—")
         }
@@ -113,7 +100,6 @@ final class StandaloneVerificationTests: XCTestCase {
         XCTAssertEqual(accounts.first?.id, "claude/\(user)/\(org)")
         XCTAssertEqual(accounts.first?.usage.error, "usage unavailable")
         XCTAssertEqual(accounts.first?.usage.windows, [])
-        XCTAssertEqual(accounts.first?.usage.needsClaudeAuthorization, false)
     }
 
     func testUsageWindowBoundariesUnknownFieldsAndFractionalReset() throws {
@@ -126,36 +112,5 @@ final class StandaloneVerificationTests: XCTestCase {
         XCTAssertEqual(usage.observedAt, now)
         let weeklyOnly = try NativeClaude.usage(data(#"{"five_hour":null,"seven_day":{"utilization":12.5}}"#))
         XCTAssertEqual(weeklyOnly.windows.map(\.percentLeft), [87.5])
-    }
-
-    func testNativeRoutingFailuresDoNotInvokeManagedExecutable() async {
-        for metadata: Result<Data, DirectSources.CredentialError> in [.failure(.missing), .success(data(#"{"accounts":{},"nextNumber":1}"#))] {
-            var nativeCalls = 0
-            let accounts = await Fetcher.claudeAccounts(metadata: metadata, managed: { XCTFail("cswap must not run"); return nil }, native: {
-                nativeCalls += 1
-                return await NativeClaude.fetch(credential: .failure(.authorization)) { _ in XCTFail("No network"); return Data() }
-            })
-            XCTAssertEqual(nativeCalls, 1)
-            XCTAssertEqual(accounts.first?.usage.error, "authorize in Settings")
-        }
-    }
-
-    func testManagedOrderingMissingCredentialsAndBrokenIdentityNeverAddNative() async throws {
-        let metadata = data(#"{"accounts":{"2":{"email":"b@example.com","uuid":"invalid"},"1":{"email":"a@example.com","uuid":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","organizationUuid":""}}}"#)
-        let output = data(#"{"accounts":[{"number":2,"email":"b@example.com","usageStatus":"ok","usage":{"fiveHour":{"pct":50}}},{"number":1,"email":"a@example.com","usageStatus":"no_credentials"}]}"#)
-        let accounts = await Fetcher.claudeAccounts(metadata: .success(metadata), managed: { output }, native: { XCTFail("Never silently add native"); return [] })
-        XCTAssertEqual(accounts.map(\.slot), [1, 2])
-        XCTAssertEqual(accounts.count, 2)
-        XCTAssertFalse(accounts[0].usage.isConfigured)
-        XCTAssertNotNil(accounts[0].id)
-        XCTAssertEqual(accounts[1].usage.constraining?.percentLeft, 50)
-        XCTAssertNil(accounts[1].id)
-    }
-
-    func testMalformedManagedSourceCannotSelectNativeEvenIfInstalledStateUnknown() async {
-        for json in ["null", "[]", #"{"accounts":null}"#, #"{"accounts":{"1":null}}"#, #"{"accounts":{"1":{"email":42}}}"#] {
-            let accounts = await Fetcher.claudeAccounts(metadata: .success(data(json)), managed: { XCTFail("No executable"); return nil }, native: { XCTFail("No account switching"); return [] })
-            XCTAssertEqual(accounts.first?.usage.error, "cswap metadata unreadable")
-        }
     }
 }

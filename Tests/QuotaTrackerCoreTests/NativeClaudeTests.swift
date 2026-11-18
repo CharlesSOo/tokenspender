@@ -1,6 +1,4 @@
 import Foundation
-import Security
-import LocalAuthentication
 import XCTest
 @testable import QuotaTrackerCore
 
@@ -10,61 +8,75 @@ final class NativeClaudeTests: XCTestCase {
     }
     private func json(_ value: String) -> Data { Data(value.utf8) }
 
-    func testNativeOnlyWithoutCswapAndEmptyManagedConfiguration() async throws {
+    func testNativeFetchVerifiesIdentityAndUsage() async throws {
         let auth = try NativeClaude.credential(fixture("auth"))
         let profile = try fixture("profile"), usage = try fixture("usage")
-        for metadata: Result<Data, DirectSources.CredentialError> in [.failure(.missing), .success(json(#"{"accounts":{}}"#))] {
-            var endpoints: [String] = []
-            let accounts = await Fetcher.claudeAccounts(metadata: metadata, managed: {
-                XCTFail("Native-only setup must not invoke or require cswap")
-                return nil
-            }, native: {
-                await NativeClaude.fetch(credential: .success(auth)) { request in
-                    endpoints.append(request.url!.lastPathComponent)
-                    XCTAssertEqual(request.url?.host, "api.anthropic.com")
-                    XCTAssertEqual(request.timeoutInterval, 20)
-                    XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-beta"), "oauth-2025-04-20")
-                    XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fake-claude-access-token")
-                    return request.url!.lastPathComponent == "profile" ? profile : usage
-                }
-            })
-            XCTAssertEqual(endpoints, ["profile", "usage"])
-            XCTAssertEqual(accounts.count, 1)
-            XCTAssertEqual(accounts[0].email, "native@example.com")
-            let id = try XCTUnwrap(accounts[0].id)
-            XCTAssertEqual(id, "claude/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002")
-            XCTAssertEqual(accounts[0].usage.windows.map(\.percentLeft), [96, 0])
-            XCTAssertNotNil(accounts[0].usage.windows[0].resetsAt)
-            let snapshot = UsageSnapshot(codex: .notConfigured, claude: accounts, kimi: .notConfigured)
-            XCTAssertEqual(DisplaySelection.claudeAccount(id).text(snapshot: snapshot), "0%")
-            XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot, selected: .mode(.claudePool)).count, 5)
+        var endpoints: [String] = []
+        let accounts = await NativeClaude.fetch(credential: .success(auth)) { request in
+            endpoints.append(request.url!.lastPathComponent)
+            XCTAssertEqual(request.url?.host, "api.anthropic.com")
+            XCTAssertEqual(request.timeoutInterval, 20)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-beta"), "oauth-2025-04-20")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fake-claude-access-token")
+            return request.url!.lastPathComponent == "profile" ? profile : usage
         }
+        XCTAssertEqual(endpoints, ["profile", "usage"])
+        XCTAssertEqual(accounts.count, 1)
+        XCTAssertEqual(accounts[0].email, "native@example.com")
+        let id = try XCTUnwrap(accounts[0].id)
+        XCTAssertEqual(id, "claude/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002")
+        XCTAssertEqual(accounts[0].usage.windows.map(\.percentLeft), [96, 0])
+        XCTAssertNotNil(accounts[0].usage.windows[0].resetsAt)
+        let snapshot = UsageSnapshot(codex: .notConfigured, claude: accounts, kimi: .notConfigured)
+        XCTAssertEqual(DisplaySelection.claudeAccount(id).text(snapshot: snapshot), "0%")
+        XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot, selected: .mode(.claudePool)).count, 5)
     }
 
-    func testManagedSourcePreferredAndFailuresNeverFallbackToNative() async throws {
-        let metadata = json(#"{"accounts":{"1":{"uuid":"00000000-0000-0000-0000-000000000001","email":"a@example.com","organizationUuid":""},"2":{"uuid":"00000000-0000-0000-0000-000000000002","email":"b@example.com","organizationUuid":""}}}"#)
-        let managed = json(#"{"accounts":[{"number":1,"email":"a@example.com","usageStatus":"token_expired"},{"number":2,"email":"b@example.com","usageStatus":"ok","usage":{"fiveHour":{"pct":25}}}]}"#)
-        for output in [managed, nil, json("invalid"), json(#"{"accounts":[]}"#)] {
-            let accounts = await Fetcher.claudeAccounts(metadata: .success(metadata), managed: { output }, native: {
-                XCTFail("Managed presence or failure must never silently switch to native")
-                return []
-            })
-            XCTAssertFalse(accounts.isEmpty)
-            XCTAssertNotNil(accounts[0].usage.error)
-            if output == managed {
-                XCTAssertEqual(accounts.count, 2)
-                XCTAssertEqual(accounts[0].usage.error, "expired")
-                XCTAssertNotNil(accounts[0].id)
-                XCTAssertEqual(accounts[1].usage.constraining?.percentLeft, 75)
-            }
+    func testProfileDiscoveryDefaultFirstDedupedSorted() {
+        let home = "/Users/x"
+        let entries = [".claude-work", ".claude", ".claude-me", ".claude-swap-backup", ".claude-empty", "other"]
+        let withConfig: Set<String> = ["/Users/x/.claude-work", "/Users/x/.claude-me", "/Users/x/.claude-swap-backup-not"]
+        let found = NativeClaude.profiles(environment: ["CLAUDE_CONFIG_DIR": "/Users/x/.claude-me"], home: home,
+                                          entries: entries, hasConfig: { withConfig.contains($0) })
+        XCTAssertEqual(found, ["", "/Users/x/.claude-me", "/Users/x/.claude-work"])
+        XCTAssertEqual(NativeClaude.profiles(environment: ["CLAUDE_CONFIG_DIR": "/elsewhere"], home: home, entries: [], hasConfig: { _ in true }),
+                       ["", "/elsewhere"])
+        XCTAssertEqual(NativeClaude.label(profile: "", home: home), "~/.claude")
+        XCTAssertEqual(NativeClaude.label(profile: "/Users/x/.claude-me", home: home), "~/.claude-me")
+        XCTAssertEqual(NativeClaude.label(profile: "/elsewhere", home: home), "/elsewhere")
+    }
+
+    func testKeychainServiceForConfigDirMatchesClaudeCode() throws {
+        let location = try NativeClaude.location(profile: "/Users/charles/.claude-me", environment: [:], home: "/Users/charles", username: "charles")
+        XCTAssertEqual(location.service, "Claude Code-credentials-8ee9146d")
+        XCTAssertEqual(location.file, "/Users/charles/.claude-me/.credentials.json")
+        XCTAssertEqual(try NativeClaude.location(profile: "", environment: [:], home: "/Users/charles", username: "charles").service,
+                       "Claude Code-credentials")
+    }
+
+    func testOneRowPerProfileMissingSkippedFailuresLabeledDuplicatesMerged() async throws {
+        let auth = try NativeClaude.credential(fixture("auth"))
+        let profile = try fixture("profile"), usage = try fixture("usage")
+        let home = "/Users/x"
+        let credentials: [String: Result<NativeClaude.Credential, NativeClaude.Failure>] = [
+            "": .failure(.expired), "/Users/x/.claude-a": .failure(.missing),
+            "/Users/x/.claude-b": .success(auth), "/Users/x/.claude-c": .success(auth),
+            "/Users/x/.claude-d": .failure(.keychain)]
+        let accounts = await NativeClaude.fetch(profiles: ["", "/Users/x/.claude-a", "/Users/x/.claude-b", "/Users/x/.claude-c", "/Users/x/.claude-d"],
+                                                home: home, load: { credentials[$0]! }) { request in
+            request.url!.lastPathComponent == "profile" ? profile : usage
         }
-        for metadata: Result<Data, DirectSources.CredentialError> in [.failure(.unreadable), .success(json("invalid")), .success(json("{}"))] {
-            let accounts = await Fetcher.claudeAccounts(metadata: metadata, managed: {
-                XCTFail("Invalid managed metadata cannot safely select a source")
-                return nil
-            }, native: { XCTFail("No native fallback"); return [] })
-            XCTAssertEqual(accounts.first?.usage.error, "cswap metadata unreadable")
-        }
+        XCTAssertEqual(accounts.map(\.profile), ["~/.claude", "~/.claude-b", "~/.claude-d"])
+        XCTAssertEqual(accounts.map(\.email), ["~/.claude", "native@example.com", "~/.claude-d"])
+        XCTAssertEqual(accounts[0].usage.error, NativeClaude.Failure.expired.rawValue)
+        XCTAssertEqual(accounts[2].usage.error, NativeClaude.Failure.keychain.rawValue)
+        XCTAssertEqual(accounts[1].id, "claude/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002")
+
+        // Same account in two profiles: the successful row wins regardless of order.
+        let failed = try NativeClaude.account(profile: profile, usage: .failure("rate limited"), label: "~/.claude")
+        let ok = try NativeClaude.account(profile: profile, usage: RowUsage(windows: []), label: "~/.claude-b")
+        XCTAssertEqual(NativeClaude.merge([[failed], [ok]]), [ok])
+        XCTAssertEqual(NativeClaude.merge([[ok], [failed]]), [ok])
     }
 
     func testCredentialExpiryMalformedMissingAndNoRefreshParsing() throws {
@@ -82,7 +94,7 @@ final class NativeClaudeTests: XCTestCase {
     }
 
     func testMissingHiddenButDeniedMalformedExpiredVisibleWithoutNetwork() async {
-        for error in [NativeClaude.Failure.missing, .expired, .malformed, .authorization, .keychain, .unsupportedProfile] {
+        for error in [NativeClaude.Failure.missing, .expired, .malformed, .keychain, .unsupportedProfile] {
             let accounts = await NativeClaude.fetch(credential: .failure(error)) { _ in
                 XCTFail("Invalid credentials must not reach the provider")
                 return Data()
@@ -91,39 +103,36 @@ final class NativeClaudeTests: XCTestCase {
             else {
                 XCTAssertEqual(accounts.count, 1)
                 XCTAssertEqual(accounts[0].usage.error, error.rawValue)
-                XCTAssertEqual(accounts[0].usage.needsClaudeAuthorization, error == .authorization || error == .keychain)
                 XCTAssertNil(accounts[0].id)
             }
         }
     }
 
-    func testKeychainConsentQueryAndFileFallbackFailClosed() throws {
+    func testKeychainFileFallbackFailClosed() throws {
         let location = try NativeClaude.location(environment: [:], home: "/fake-home", username: "example")
         let auth = try fixture("auth")
-        for allow in [false, true] {
-            let query = NativeClaude.keychainQuery(location: location, authorize: allow)
-            XCTAssertEqual(query[kSecAttrService as String] as? String, "Claude Code-credentials")
-            XCTAssertEqual(query[kSecAttrAccount as String] as? String, "example")
-            XCTAssertEqual(query[kSecMatchLimit as String] as? String, kSecMatchLimitOne as String)
-            XCTAssertEqual((query[kSecUseAuthenticationContext as String] as? LAContext)?.interactionNotAllowed, !allow)
-            _ = try NativeClaude.loadCredential(location: location, authorize: allow, keychain: { _, authorize in
-                XCTAssertEqual(authorize, allow)
-                return .success(auth)
-            }, file: { _ in XCTFail("Present Keychain wins"); return .failure(.missing) })
-        }
-        _ = try NativeClaude.loadCredential(location: location, authorize: false, keychain: { _, _ in .failure(.missing) }, file: {
+        _ = try NativeClaude.loadCredential(location: location, keychain: {
+            XCTAssertEqual($0.service, "Claude Code-credentials")
+            XCTAssertEqual($0.account, "example")
+            return .success(auth)
+        }, file: { _ in XCTFail("Present Keychain wins"); return .failure(.missing) })
+        _ = try NativeClaude.loadCredential(location: location, keychain: { _ in .failure(.missing) }, file: {
             XCTAssertEqual($0, "/fake-home/.claude/.credentials.json")
             return .success(auth)
         })
-        for error in [NativeClaude.Failure.authorization, .keychain, .malformed, .expired] {
-            XCTAssertThrowsError(try NativeClaude.loadCredential(location: location, authorize: false,
-                keychain: { _, _ in .failure(error) }, file: { _ in XCTFail("No fallback on failure"); return .success(auth) }))
+        for error in [NativeClaude.Failure.keychain, .timeout, .malformed, .expired] {
+            XCTAssertThrowsError(try NativeClaude.loadCredential(location: location,
+                keychain: { _ in .failure(error) }, file: { _ in XCTFail("No fallback on failure"); return .success(auth) }))
         }
-        XCTAssertThrowsError(try NativeClaude.loadCredential(location: location, authorize: false,
-            keychain: { _, _ in .success(json("invalid")) }, file: { _ in XCTFail("Malformed does not fallback"); return .success(auth) }))
-        XCTAssertEqual(NativeClaude.keychainFailure(errSecItemNotFound), .missing)
-        for status in [errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled, errSecNoAccessForItem] {
-            XCTAssertEqual(NativeClaude.keychainFailure(status), .authorization)
+        XCTAssertThrowsError(try NativeClaude.loadCredential(location: location,
+            keychain: { _ in .success(json("invalid")) }, file: { _ in XCTFail("Malformed does not fallback"); return .success(auth) }))
+    }
+
+    func testSecurityExitCodeMapping() {
+        XCTAssertNil(NativeClaude.keychainStatus(exitCode: 0))
+        XCTAssertEqual(NativeClaude.keychainStatus(exitCode: 44), .missing)
+        for code: Int32 in [1, 36, 45, 51, 128, -1] {
+            XCTAssertEqual(NativeClaude.keychainStatus(exitCode: code), .keychain)
         }
     }
 

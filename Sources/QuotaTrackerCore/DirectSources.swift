@@ -145,11 +145,14 @@ public enum DirectSources {
             let primary_window: Window?
             let secondary_window: Window?
         }
+        let plan_type: String?
         let rate_limit: RateLimit?
     }
 
     public static func parseCodex(_ data: Data, now: Date = Date()) -> RowUsage {
         guard let usage = try? JSONDecoder().decode(CodexUsage.self, from: data) else { return .failure("Unreadable usage response") }
+        // A lapsed subscription still answers with a 30-day free-tier window; hide it like a missing login.
+        if usage.plan_type == "free" { return .notConfigured }
         let windows = [usage.rate_limit?.primary_window, usage.rate_limit?.secondary_window].compactMap { w -> UsageWindow? in
             guard let w, let used = w.used_percent else { return nil }
             let label = (w.limit_window_seconds ?? 0) > 86400 ? "WK" : "5H"
@@ -175,6 +178,7 @@ public enum DirectSources {
             guard status != 401 else { throw CodexOAuth.Failure.loginRequired }
             guard status == 200 else { return .failure(Parse.quiet("HTTP \(status)")) }
             var row = parseCodex(data)
+            guard row.isConfigured else { return row }
             row.observedAt = Date()
             row.identity = cred.accountId ?? SHA256.hash(data: Data(cred.access.utf8)).description
             return row

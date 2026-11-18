@@ -3,36 +3,16 @@ import XCTest
 @testable import QuotaTrackerCore
 
 final class ParseTests: XCTestCase {
-    func testCswapDynamicAccountsAndFreshness() throws {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "cswap-list", withExtension: "json", subdirectory: "Fixtures"))
-        let rows = try XCTUnwrap(Parse.cswap(Data(contentsOf: url)))
-        XCTAssertEqual(rows.map(\.email), ["you@example.com", "work@example.com"])
-        XCTAssertEqual(rows[0].usage.windows.map(\.percentLeft), [97, 100])
-        XCTAssertEqual(rows[1].usage.windows.map(\.percentLeft), [100, 16])
-        XCTAssertNotNil(rows[0].usage.windows[0].resetsAt)
-        XCTAssertNotNil(rows[0].usage.observedAt)
-        XCTAssertNil(rows[1].usage.windows[0].resetsAt)
-        XCTAssertNil(rows[0].id) // Usage-only list output cannot establish stable identity.
-    }
-
-    func testStatusesOverrideCachedUsageAndMissingFields() throws {
-        for (status, error, configured) in [("token_expired", "expired", true), ("relogin_required", "expired", true), ("no_credentials", "not configured", false), ("blocked", "unavailable", true)] {
-            let data = Data("{\"accounts\":[{\"number\":7,\"email\":\"demo@example.com\",\"usageStatus\":\"\(status)\",\"usage\":{\"fiveHour\":{\"pct\":2}}}]}".utf8)
-            let usage = try XCTUnwrap(Parse.cswap(data)?.first?.usage)
-            XCTAssertEqual(usage.error, error)
-            XCTAssertEqual(usage.isConfigured, configured)
-            XCTAssertTrue(usage.windows.isEmpty)
-        }
-        XCTAssertEqual(Parse.cswap(Data(#"{"accounts":[]}"#.utf8)), [])
-        XCTAssertNil(Parse.cswap(Data("{}".utf8)))
+    func testDateParsing() {
         XCTAssertNotNil(Parse.date("2026-10-08T09:38:41Z"))
+        XCTAssertNotNil(Parse.date("2026-10-08T09:38:41.123456+00:00"))
     }
 
     func testModesAndWeeklyExhaustion() {
         func row(_ five: Double, _ week: Double) -> RowUsage {
             RowUsage(windows: [UsageWindow(label: "5H", percentLeft: five, resetsAt: nil), UsageWindow(label: "WK", percentLeft: week, resetsAt: nil)])
         }
-        let snapshot = UsageSnapshot(codex: row(80, 40), claude: [ClaudeAccount(slot: 2, email: "a@example.com", usage: row(100, 0)), ClaudeAccount(slot: 7, email: "b@example.com", usage: row(60, 80))], kimi: .notConfigured)
+        let snapshot = UsageSnapshot(codex: row(80, 40), claude: [ClaudeAccount(profile: "~/.claude", email: "a@example.com", usage: row(100, 0)), ClaudeAccount(profile: "~/.claude-b", email: "b@example.com", usage: row(60, 80))], kimi: .notConfigured)
         XCTAssertEqual(MenuLabel.text(mode: .availableNow, snapshot: snapshot), "33%")
         XCTAssertEqual(MenuLabel.text(mode: .lowest, snapshot: snapshot), "0%")
         XCTAssertEqual(MenuLabel.text(mode: .claudePool, snapshot: snapshot), "30%")
