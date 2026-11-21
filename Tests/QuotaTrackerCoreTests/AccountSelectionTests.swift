@@ -73,9 +73,9 @@ final class AccountSelectionTests: XCTestCase {
         account.usage = RowUsage(windows: [UsageWindow(label: "5H", percentLeft: 99, resetsAt: nil),
                                            UsageWindow(label: "WK", percentLeft: 0, resetsAt: nil)])
         XCTAssertEqual(selected.text(snapshot: snapshot([account])), "0%")
-        account.usage.error = "expired"
+        account.usage.error = "signed out"
         XCTAssertEqual(selected.text(snapshot: snapshot([account])), "—")
-        XCTAssertTrue(DisplaySelection.choices(snapshot: snapshot([account]), selected: selected).last!.title.contains("expired"))
+        XCTAssertTrue(DisplaySelection.choices(snapshot: snapshot([account]), selected: selected).last!.title.contains("signed out"))
         account.usage = .notConfigured
         XCTAssertEqual(selected.text(snapshot: snapshot([account])), "—")
         XCTAssertFalse(DisplaySelection.choices(snapshot: snapshot([account]), selected: selected).last!.enabled)

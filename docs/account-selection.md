@@ -23,7 +23,7 @@ Only a genuinely absent Keychain item permits reading `.credentials.json` in the
 
 QuotaTracker never refreshes tokens itself. When a folder's login is past `expiresAt` or the API answers 401, it runs `claude -p /usage --output-format json` with `CLAUDE_CONFIG_DIR` set to that folder (unset for the default folder). That command makes no model call, but Claude Code renews its own login while starting. It runs at most once per folder every 10 minutes, in its own process group with stdin closed and output discarded. Its environment is QuotaTracker's minus `CLAUDE_SECURESTORAGE_CONFIG_DIR`, so only the folder decides which login renews. After 20 seconds the whole group gets SIGTERM, then SIGKILL 2 seconds later, so nothing it started outlives the deadline; `claude` is looked up in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, then the login shell's `PATH` (read until the shell exits, under the same deadline). The Keychain is then read again.
 
-If renewal fails, the row keeps its last good numbers, dimmed, with the hint **run claude in ~/.claude-me** (the folder's label), and the footer reads **LOGIN EXPIRED · UPDATED …**. Only network, timeout, 5xx and 429 failures say **OFFLINE · UPDATED …**.
+An expired token is an internal detail: the UI never says "expired". While renewal is being tried, the row keeps its last good numbers, dimmed, with no hint, and the footer shows the normal **UPDATED …**. Only after two renewal runs in a row leave the login expired (about 10 minutes apart, given the throttle) is the folder treated as signed out: the row shows **signed out · run claude in ~/.claude-me** (the folder's label) under its dimmed numbers. A folder with no last good numbers shows that hint straight away instead of an error. A later success clears the count. Only network, timeout, 5xx and 429 failures make the footer say **OFFLINE · UPDATED …**.
 
 ### Verified identity, plan and limits
 
@@ -45,16 +45,16 @@ Adapted CodexBar code is MIT-licensed; see `THIRD_PARTY_NOTICES.md`.
 
 ## Claude pool and menu bar
 
-The Claude section leads with the pool, `CLAUDE POOL · 20× Pro`: each account with numbers (fresh, or last good while stale) is weighted by its plan's weekly capacity (Pro 1, Max 5, Ultra 10). An unknown or missing plan weighs 1 and the pool is tagged **EST.**. Lines are weighted means of percent left:
+The popover leads with the token pool: its NOW as the large number, then WK and model-scoped bars. Each account with numbers (fresh, or last good while stale) is weighted by its plan's weekly capacity (Pro 1, Max 5, Ultra 10); an unknown or missing plan weighs 1. Lines are weighted means of percent left:
 
 - **NOW**: per account the lower of 5H and WK left; an account without a 5-hour limit counts 5H as 100%.
 - **WK**: the `weekly_all` limit.
 - One line per model-scoped weekly limit (e.g. **FABLE**); these never lower NOW.
 
-Accounts lacking a window are left out of that line. Rows with no numbers (errors, still loading) are left out entirely. Per-account rows follow as the breakdown; Codex is a separate section and never pooled.
+Accounts lacking a window are left out of that line. Rows with no numbers (errors, still loading) are left out entirely. Resets appear only on the account rows that follow as the breakdown; Codex is a separate section and never pooled.
 
 The menu-bar number is the pool's NOW by default. Settings can instead show Codex, or pin one verified Claude account (that account's NOW). Missing pins stay checked as unavailable, persist through refresh and relaunch, and recover when the same identity returns. These percentages are quota estimates, not token balances.
 
 ## Verification
 
-`swift test` covers folder discovery and Keychain-service hashing, one row per folder with failures labeled, duplicate-account merging, credential parsing, `limits[]` mapping, delegated renewal and its throttle, the renewal runner's process-group cleanup and environment, last-good merging, pool weighting and lines, footer wording, and pins, all with synthetic fixtures. Tests do not query the real Keychain, run `claude`, or call providers. Privacy-safe demo renders use `QUOTATRACKER_DEMO=1` (or `stale`, `single`) with `QUOTATRACKER_SNAPSHOT_DIR` set to a private temporary directory; without `QUOTATRACKER_DEMO` the same render uses live data.
+`swift test` covers folder discovery and Keychain-service hashing, one row per folder with failures labeled, duplicate-account merging, credential parsing, `limits[]` mapping, delegated renewal and its throttle, the renewal runner's process-group cleanup and environment, last-good merging, pool weighting and lines, footer wording, and pins, all with synthetic fixtures. Tests do not query the real Keychain, run `claude`, or call providers. Privacy-safe demo renders use `QUOTATRACKER_DEMO=1` (or `stale`, `signedout`, `single`) with `QUOTATRACKER_SNAPSHOT_DIR` set to a private temporary directory; without `QUOTATRACKER_DEMO` the same render uses live data.

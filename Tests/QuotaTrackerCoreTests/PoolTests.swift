@@ -16,8 +16,6 @@ final class PoolTests: XCTestCase {
     func testTwoUltraAccountsArePlainMean() throws {
         let pool = ClaudePool(accounts: [account("Ultra", [("5H", 80), ("WK", 60)]), account("Ultra", [("5H", 40), ("WK", 20)])])
         XCTAssertEqual(pool.size, 20)
-        XCTAssertEqual(pool.title, "CLAUDE POOL · 20× Pro")
-        XCTAssertFalse(pool.isEstimated)
         XCTAssertEqual(try XCTUnwrap(pool.now), 40, accuracy: 1e-9) // mean(min(80,60), min(40,20))
         XCTAssertEqual(try XCTUnwrap(value(pool, "WK")), 40, accuracy: 1e-9)
         XCTAssertEqual(pool.lines.map(\.label), ["NOW", "WK"])
@@ -49,52 +47,61 @@ final class PoolTests: XCTestCase {
         let failed = ClaudeAccount(profile: "~/.claude-x", email: "~/.claude-x", usage: .failure("expired"))
         let pool = ClaudePool(accounts: [stale, empty, failed])
         XCTAssertEqual(pool.size, 5)
-        XCTAssertFalse(pool.isEstimated) // the failed row's missing plan does not count
         XCTAssertEqual(try XCTUnwrap(pool.now), 20, accuracy: 1e-9)
         XCTAssertNil(ClaudePool(accounts: [empty, failed]).now)
-        XCTAssertEqual(ClaudePool(accounts: [empty, failed]).title, "CLAUDE POOL")
+        XCTAssertEqual(ClaudePool(accounts: [empty, failed]).size, 0)
     }
 
-    func testNextResetIsEarliestPooledWindow() {
-        let soon = Date(timeIntervalSince1970: 1000), later = Date(timeIntervalSince1970: 9000)
-        let a = ClaudeAccount(profile: "~/.claude", email: "a", usage: RowUsage(windows: [UsageWindow(label: "WK", percentLeft: 50, resetsAt: later)]), plan: "Max")
-        let b = ClaudeAccount(profile: "~/.claude-b", email: "b", usage: RowUsage(windows: [UsageWindow(label: "5H", percentLeft: 50, resetsAt: soon), UsageWindow(label: "WK", percentLeft: 50, resetsAt: nil)]), plan: "Max")
-        let failed = ClaudeAccount(profile: "~/.claude-x", email: "x", usage: .failure("expired"))
-        XCTAssertEqual(ClaudePool(accounts: [a, b, failed]).nextReset, UsageWindow(label: "5H", percentLeft: 50, resetsAt: soon))
-        XCTAssertNil(ClaudePool(accounts: [failed]).nextReset)
-    }
-
-    func testUnknownPlanWeighsOneAndIsEstimated() throws {
+    func testUnknownPlanWeighsOne() throws {
         let pool = ClaudePool(accounts: [account(nil, [("5H", 100), ("WK", 100)]), account("Team", [("5H", 0), ("WK", 0)]), account("Pro", [("5H", 40), ("WK", 40)])])
         XCTAssertEqual(pool.size, 3)
-        XCTAssertTrue(pool.isEstimated)
         XCTAssertEqual(try XCTUnwrap(pool.now), (100 + 0 + 40) / 3, accuracy: 1e-9)
         XCTAssertEqual(PlanWeight.of("ultra"), 10)
         XCTAssertNil(PlanWeight.of(nil))
     }
 
-    func testStaleFooterNamesExpiredLoginVersusOffline() {
+    func testFooterSaysOfflineOnlyForNetworkStaleRows() {
         let now = Date(timeIntervalSince1970: 100_000)
-        var expired = RowUsage(windows: [UsageWindow(label: "WK", percentLeft: 50, resetsAt: nil)], observedAt: now.addingTimeInterval(-3 * 3600))
-        expired.isStale = true
-        expired.hint = "run claude in ~/.claude-me"
-        XCTAssertEqual(Footer.stale([expired], now: now), "LOGIN EXPIRED · UPDATED 3H AGO")
-        var offline = expired
-        offline.hint = nil
-        XCTAssertEqual(Footer.stale([offline], now: now), "OFFLINE · UPDATED 3H AGO")
-        XCTAssertNil(Footer.stale([RowUsage(windows: expired.windows, observedAt: now)], now: now))
+        var renewing = RowUsage(windows: [UsageWindow(label: "WK", percentLeft: 50, resetsAt: nil)], observedAt: now.addingTimeInterval(-3 * 3600))
+        renewing.isStale = true
+        XCTAssertNil(Footer.offline([renewing], now: now), "a login being renewed is only dimmed")
+        var signedOut = renewing
+        signedOut.hint = "signed out · run claude in ~/.claude-me"
+        XCTAssertNil(Footer.offline([signedOut], now: now))
+        var offline = renewing
+        offline.isTransient = true
+        XCTAssertEqual(Footer.offline([renewing, offline], now: now), "OFFLINE · UPDATED 3H AGO")
+        XCTAssertNil(Footer.offline([RowUsage(windows: renewing.windows, observedAt: now)], now: now))
     }
 
-    func testExpiredLoginMergeYieldsLoginExpiredFooter() {
+    func testExpiredLoginKeepsDimmedNumbersWithoutHintOrOfflineFooter() {
         let now = Date(timeIntervalSince1970: 100_000)
         let good = ClaudeAccount(profile: "~/.claude", email: "a@example.com",
                                  usage: RowUsage(windows: [UsageWindow(label: "WK", percentLeft: 50, resetsAt: nil)], observedAt: now.addingTimeInterval(-600)),
                                  id: "claude/a/o", plan: "Ultra")
-        var failure = RowUsage.failure("expired")
-        failure.hint = "run claude in ~/.claude"
-        let merged = LastGood.merge(fresh: UsageSnapshot(claude: [ClaudeAccount(profile: "~/.claude", email: "~/.claude", usage: failure, id: "claude/a/o")]),
-                                    previous: UsageSnapshot(claude: [good]))
-        XCTAssertEqual(Footer.stale(merged.claude.map(\.usage), now: now), "LOGIN EXPIRED · UPDATED 10M AGO")
+        let expired = ClaudeAccount(profile: "~/.claude", email: "~/.claude", usage: .failure(NativeClaude.Failure.expired.rawValue), id: "claude/a/o")
+        let merged = LastGood.merge(fresh: UsageSnapshot(claude: [expired]), previous: UsageSnapshot(claude: [good]))
+        XCTAssertTrue(merged.claude[0].usage.isStale)
+        XCTAssertNil(merged.claude[0].hint)
+        XCTAssertNil(Footer.offline(merged.claude.map(\.usage), now: now))
         XCTAssertEqual(ClaudePool(accounts: merged.claude).now, 50)
+
+        // Signed out (renewal failed twice): same dimmed numbers, now with the hint.
+        var signedOut = expired
+        signedOut.usage.hint = NativeClaude.signedOutHint("~/.claude")
+        let kept = LastGood.merge(fresh: UsageSnapshot(claude: [signedOut]), previous: merged)
+        XCTAssertEqual(kept.claude[0].hint, "signed out · run claude in ~/.claude")
+        XCTAssertEqual(kept.claude[0].usage.windows.first?.percentLeft, 50)
+    }
+
+    func testExpiredWithoutLastGoodShowsSignedOutHintNeverExpired() {
+        let failed = ClaudeAccount(profile: "~/.claude-me", email: "~/.claude-me", usage: .failure(NativeClaude.Failure.expired.rawValue))
+        let merged = LastGood.merge(fresh: UsageSnapshot(claude: [failed]), previous: UsageSnapshot())
+        XCTAssertEqual(merged.claude[0].hint, "signed out · run claude in ~/.claude-me")
+        XCTAssertFalse(NativeClaude.Failure.expired.rawValue.contains("expired"))
+        XCTAssertFalse(CodexOAuth.Failure.loginRequired.rawValue.contains("expired"))
+        XCTAssertEqual(Parse.quiet("HTTP 401"), "signed out")
+        let network = ClaudeAccount(profile: "~/.claude", email: "~/.claude", usage: .failure("network error", transient: true))
+        XCTAssertNil(network.hint)
     }
 }

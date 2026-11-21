@@ -16,6 +16,7 @@ public struct RowUsage: Equatable, Sendable, Codable {
     public var windows: [UsageWindow] = []
     public var error: String?
     /// The error is a connectivity/server hiccup (offline, timeout, 5xx, 429); last good data may stand in.
+    /// Kept on a stale row: it is stale because the network failed (the footer then says OFFLINE).
     public var isTransient = false
     /// Last good data shown in place of a failure; `observedAt` is when it was fetched.
     public var isStale = false
@@ -24,7 +25,7 @@ public struct RowUsage: Equatable, Sendable, Codable {
     /// Source observation time, not the time a cached response was read.
     public var observedAt: Date?
     public var identity: String?
-    /// What the user can do to recover a stale row, e.g. "run claude in ~/.claude".
+    /// What the user must do, e.g. "signed out · run claude in ~/.claude"; set only once renewal keeps failing.
     public var hint: String?
 
     /// The window with the least left.
@@ -66,6 +67,12 @@ public struct ClaudeAccount: Equatable, Sendable, Codable {
 
     /// Row title: "you@example.com · Ultra".
     public var title: String { plan.map { "\(email) · \($0)" } ?? email }
+
+    /// Line under the row, never an "expired" error: the signed-out hint once renewal keeps failing, or
+    /// straight away when an expired login has no last good numbers to show. Nil while renewing silently.
+    public var hint: String? {
+        usage.hint ?? (usage.error == NativeClaude.Failure.expired.rawValue ? NativeClaude.signedOutHint(profile) : nil)
+    }
 }
 
 /// One fetch of every provider. Claude has one row per Claude Code config profile.
@@ -94,7 +101,7 @@ public enum DisplayMode: Int, CaseIterable, Sendable {
 
 /// Weekly capacity of a Claude plan relative to Pro, keyed by the profile's `plan_display_name`.
 /// shortcut: hand-kept table (Pro 1, Max 5, Ultra 10) from Anthropic's published plan multiples; update it
-/// when Anthropic adds, renames or re-sizes a plan. Unknown plans weigh 1 and mark the pool estimated.
+/// when Anthropic adds, renames or re-sizes a plan. Unknown plans weigh 1.
 public enum PlanWeight {
     static let table: [String: Int] = ["pro": 1, "max": 5, "ultra": 10]
 
@@ -114,24 +121,16 @@ public struct ClaudePool: Equatable, Sendable {
 
     /// Σ plan weights of pooled accounts, in units of Pro.
     public let size: Int
-    /// Some pooled account's plan is unknown, so its weight is a guess.
-    public let isEstimated: Bool
     /// "NOW", "WK", then one line per model-scoped weekly cap (e.g. "FABLE"); lines with no data are omitted.
     public let lines: [Line]
-    /// The pooled window that resets first (label kept, e.g. "5H"); nil when no reset is known.
-    public let nextReset: UsageWindow?
 
     /// Per account min(5H, WK) left, a missing 5H window counting as 100% (that plan has no 5-hour limit).
     public var now: Double? { lines.first { $0.label == "NOW" }?.percentLeft }
-
-    /// "CLAUDE POOL · 20× Pro"; plain "CLAUDE POOL" when empty.
-    public var title: String { size > 0 ? "CLAUDE POOL · \(size)× Pro" : "CLAUDE POOL" }
 
     public init(accounts: [ClaudeAccount]) {
         let pooled = accounts.filter { $0.usage.isConfigured && $0.usage.error == nil && !$0.usage.windows.isEmpty }
         let weights = pooled.map { Double(PlanWeight.of($0.plan) ?? 1) }
         size = Int(weights.reduce(0, +))
-        isEstimated = pooled.contains { PlanWeight.of($0.plan) == nil }
 
         func left(_ usage: RowUsage, _ label: String) -> Double? {
             usage.windows.filter { $0.label == label && $0.percentLeft.isFinite }.map(\.percentLeft).min()
@@ -154,7 +153,6 @@ public struct ClaudePool: Equatable, Sendable {
         }
         let candidates: [(String, Double?)] = [("NOW", now), ("WK", mean { left($0, "WK") })] + labels.map { label in (label, mean { left($0, label) }) }
         lines = candidates.compactMap { label, value in value.map { Line(label: label, percentLeft: $0) } }
-        nextReset = pooled.flatMap(\.usage.windows).filter { $0.resetsAt != nil }.min { $0.resetsAt! < $1.resetsAt! }
     }
 }
 
@@ -170,14 +168,14 @@ public enum MenuLabel {
 }
 
 public enum Footer {
-    /// "OFFLINE · UPDATED 3H AGO" for the oldest stale row, or "LOGIN EXPIRED · …" when that row is stale
-    /// because its Claude login could not be renewed (such rows carry a recovery hint). Nil if nothing is stale.
-    public static func stale(_ rows: [RowUsage], now: Date) -> String? {
-        let stale = rows.filter { $0.isConfigured && $0.isStale }.compactMap { row in row.observedAt.map { (row, $0) } }
-        guard let (row, at) = stale.min(by: { $0.1 < $1.1 }) else { return nil }
+    /// "OFFLINE · UPDATED 3H AGO" for the oldest row kept stale by a network failure. Rows stale for
+    /// other reasons (a login being renewed) are only dimmed, so nil: the footer shows the normal update time.
+    public static func offline(_ rows: [RowUsage], now: Date) -> String? {
+        let stale = rows.filter { $0.isConfigured && $0.isStale && $0.isTransient }.compactMap(\.observedAt)
+        guard let at = stale.min() else { return nil }
         let minutes = max(0, Int(now.timeIntervalSince(at) / 60))
         let ago = minutes < 1 ? "JUST NOW" : minutes < 60 ? "\(minutes)M AGO" : minutes < 1440 ? "\(minutes / 60)H AGO" : "\(minutes / 1440)D AGO"
-        return "\(row.hint != nil ? "LOGIN EXPIRED" : "OFFLINE") · UPDATED \(ago)"
+        return "OFFLINE · UPDATED \(ago)"
     }
 }
 
@@ -305,7 +303,7 @@ public enum Parse {
     static func quiet(_ message: String) -> String {
         let lower = message.lowercased()
         if lower.contains("expired") || lower.contains("401") || lower.contains("unauthorized") {
-            return "expired"
+            return "signed out"
         }
         let line = message.split(whereSeparator: \.isNewline).first.map(String.init) ?? message
         return line.count > 40 ? String(line.prefix(39)) + "…" : line

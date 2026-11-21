@@ -63,8 +63,14 @@ final class ReliableClaudeEdgeTests: XCTestCase {
         XCTAssertEqual(rows.count, 1)
         XCTAssertNil(rows[0].id)
         XCTAssertEqual(rows[0].usage.error, NativeClaude.Failure.expired.rawValue)
-        XCTAssertEqual(rows[0].usage.hint, "run claude in /work/claude", "folders outside home keep their absolute path")
+        XCTAssertNil(rows[0].usage.hint, "one failed renewal is not yet signed out")
         XCTAssertFalse(rows[0].usage.isTransient)
+        counter.advance(NativeClaude.Refresher.interval)
+        let again = await NativeClaude.fetch(profile: "/work/claude", home: "/Users/x", refresher: refresher,
+                                             load: { _ in _ = counter.load(); return .failure(.expired) },
+                                             transport: { _ in XCTFail("no request with a dead token"); return Data() })
+        XCTAssertEqual(counter.loadCount, 4)
+        XCTAssertEqual(again[0].usage.hint, "signed out · run claude in /work/claude", "folders outside home keep their absolute path")
     }
 
     func testThrottledExpiryDoesNotReread() async {
@@ -76,7 +82,7 @@ final class ReliableClaudeEdgeTests: XCTestCase {
                                             transport: { _ in Data() })
         XCTAssertEqual(counter.loadCount, 1)
         XCTAssertEqual(counter.runList, [""])
-        XCTAssertEqual(rows.first?.usage.hint, "run claude in ~/.claude")
+        XCTAssertNil(rows.first?.usage.hint, "no renewal has failed for this folder")
     }
 
     func testUsage401AfterVerifiedProfileRenewsAndKeepsIdentityWithHint() async throws {
@@ -91,9 +97,9 @@ final class ReliableClaudeEdgeTests: XCTestCase {
         }
         XCTAssertEqual(counter.runList, ["/Users/x/.claude-me"])
         XCTAssertEqual(rows.first?.id, "claude/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002")
-        XCTAssertEqual(rows.first?.usage.hint, "run claude in ~/.claude-me")
+        XCTAssertNil(rows.first?.usage.hint)
 
-        // LastGood matches the verified id and keeps the previous numbers with the hint.
+        // LastGood matches the verified id and keeps the previous numbers, dimmed, without a hint.
         var good = RowUsage(windows: [UsageWindow(label: "WK", percentLeft: 55, resetsAt: nil)], observedAt: Date())
         good.identity = nil
         let previous = UsageSnapshot(claude: [ClaudeAccount(profile: "~/.claude-me", email: "native@example.com", usage: good,
@@ -102,7 +108,7 @@ final class ReliableClaudeEdgeTests: XCTestCase {
         XCTAssertEqual(merged.claude.count, 1)
         XCTAssertTrue(merged.claude[0].usage.isStale)
         XCTAssertNil(merged.claude[0].usage.error)
-        XCTAssertEqual(merged.claude[0].usage.hint, "run claude in ~/.claude-me")
+        XCTAssertNil(merged.claude[0].usage.hint)
         XCTAssertEqual(merged.claude[0].usage.windows.first?.percentLeft, 55)
     }
 
@@ -126,7 +132,7 @@ final class ReliableClaudeEdgeTests: XCTestCase {
     func testExpiredHintDoesNotBorrowAnotherFoldersRow() {
         let previous = UsageSnapshot(claude: [ClaudeAccount(profile: "~/.claude-me", email: "a@example.com", usage: good(40), id: "claude/a/o")])
         var expired = RowUsage.failure(NativeClaude.Failure.expired.rawValue)
-        expired.hint = "run claude in ~/.claude"
+        expired.hint = "signed out · run claude in ~/.claude"
         let fresh = UsageSnapshot(claude: [ClaudeAccount(profile: "~/.claude", email: "~/.claude", usage: expired)])
         let merged = LastGood.merge(fresh: fresh, previous: previous)
         XCTAssertEqual(merged.claude[0].usage.error, NativeClaude.Failure.expired.rawValue)
@@ -136,13 +142,13 @@ final class ReliableClaudeEdgeTests: XCTestCase {
     func testStaleHintedRowSurvivesRepeatedExpiryAndPersists() throws {
         let previous = UsageSnapshot(claude: [ClaudeAccount(profile: "~/.claude", email: "a@example.com", usage: good(40), id: "claude/a/o", plan: "Ultra")])
         var expired = RowUsage.failure(NativeClaude.Failure.expired.rawValue)
-        expired.hint = "run claude in ~/.claude"
+        expired.hint = "signed out · run claude in ~/.claude"
         let fresh = UsageSnapshot(claude: [ClaudeAccount(profile: "~/.claude", email: "~/.claude", usage: expired)])
         let once = LastGood.merge(fresh: fresh, previous: previous)
         let twice = LastGood.merge(fresh: fresh, previous: once)
         XCTAssertEqual(twice.claude[0].usage.windows.first?.percentLeft, 40)
         XCTAssertTrue(twice.claude[0].usage.isStale)
-        XCTAssertEqual(twice.claude[0].usage.hint, "run claude in ~/.claude")
+        XCTAssertEqual(twice.claude[0].usage.hint, "signed out · run claude in ~/.claude")
         XCTAssertEqual(twice.claude[0].title, "a@example.com · Ultra")
 
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
@@ -239,6 +245,12 @@ final class ReliableClaudeEdgeTests: XCTestCase {
             request.url!.lastPathComponent == "profile" ? profile : usage
         }
         XCTAssertEqual(counter.runList.sorted(), ["", "/a"])
-        XCTAssertEqual(rows.map(\.usage.hint), ["run claude in ~/.claude", "run claude in /a", nil])
+        XCTAssertEqual(rows.map(\.usage.hint), [nil, nil, nil])
+        counter.advance(NativeClaude.Refresher.interval)
+        let again = await NativeClaude.fetch(profiles: ["", "/a", "/b"], home: "/Users/x", refresher: refresher,
+                                             load: { p in p == "/b" ? .success(credential) : .failure(.expired) }) { request in
+            request.url!.lastPathComponent == "profile" ? profile : usage
+        }
+        XCTAssertEqual(again.map(\.usage.hint), ["signed out · run claude in ~/.claude", "signed out · run claude in /a", nil])
     }
 }

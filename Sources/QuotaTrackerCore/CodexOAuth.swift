@@ -8,7 +8,7 @@ actor CodexOAuth {
     private var renewals: [String: Task<DirectSources.Credential, Error>] = [:]
 
     enum Failure: String, Error {
-        case loginRequired = "expired — log in Codex"
+        case loginRequired = "signed out · run codex"
         case changed = "Codex login changed — refresh again"
         case response = "Unreadable token renewal response"
         case save = "Cannot save Codex credentials"

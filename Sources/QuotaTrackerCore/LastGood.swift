@@ -1,19 +1,21 @@
 import Foundation
 
-/// Offline resilience: rows that fail transiently, or whose Claude login could not be renewed, keep
-/// their last good usage, marked stale, and the
-/// last good rows persist across launches. Only usage numbers, labels, reset times and row ids are kept.
+/// Offline resilience: rows that fail transiently, or whose Claude login has expired, keep their last
+/// good usage, marked stale, and the last good rows persist across launches. Only usage numbers, labels, reset times and row ids are kept.
 public enum LastGood {
     public static let defaultURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("QuotaTracker/last-snapshot.json")
 
     static func isGood(_ row: RowUsage) -> Bool { row.isConfigured && row.error == nil && !row.windows.isEmpty }
 
-    /// A failure that last good numbers may stand in for: transient, or a login failure carrying a hint.
-    static func isRecoverable(_ row: RowUsage) -> Bool { row.error != nil && (row.isTransient || row.hint != nil) }
+    /// A failure that last good numbers may stand in for: transient, or an expired Claude login (being
+    /// renewed, or signed out with a hint).
+    static func isRecoverable(_ row: RowUsage) -> Bool {
+        row.error != nil && (row.isTransient || row.hint != nil || row.error == NativeClaude.Failure.expired.rawValue)
+    }
 
     /// `fresh` with each recoverable failure replaced by the matching good row from `previous`, marked
-    /// stale and carrying the failure's hint. Codex matches by identity (or slot when the failure carries
+    /// stale, carrying the failure's hint (signed out only) and whether it was transient (offline). Codex matches by identity (or slot when the failure carries
     /// none); Claude by account id, or by profile when the failure happened before the account was verified.
     public static func merge(fresh: UsageSnapshot, previous: UsageSnapshot) -> UsageSnapshot {
         func keep(_ new: RowUsage, _ old: RowUsage) -> RowUsage {
@@ -22,6 +24,7 @@ public enum LastGood {
             var row = old
             row.isStale = true
             row.hint = new.hint
+            row.isTransient = new.isTransient
             return row
         }
         var merged = fresh

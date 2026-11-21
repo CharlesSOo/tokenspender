@@ -8,7 +8,8 @@ public enum NativeClaude {
     enum Failure: String, Error {
         case missing = "not logged in"
         case malformed = "Claude auth unreadable"
-        case expired = "expired — log in Claude"
+        /// Past `expiresAt` or HTTP 401: renewed silently; only shown (as the signed-out hint) once renewal keeps failing.
+        case expired = "signed out"
         case keychain = "Keychain unavailable"
         case profile = "profile unavailable"
         case unsupportedProfile = "unsupported profile path"
@@ -306,8 +307,12 @@ public enum NativeClaude {
         return result
     }
 
+    /// "signed out · run claude in ~/.claude-me".
+    static func signedOutHint(_ label: String) -> String { "signed out · run claude in \(label)" }
+
     /// One folder's row. An expired login (past `expiresAt` or HTTP 401) is renewed through the refresher,
-    /// then the Keychain is read again; if it still fails the row carries a hint naming the folder.
+    /// then the Keychain is read again. Only after two renewal runs in a row failed is the folder treated
+    /// as signed out and the row given the hint; until then an expiry is an internal detail.
     static func fetch(profile: String, home: String, refresher: Refresher,
                       load: @escaping @Sendable (String) async -> Result<Credential, Failure>,
                       transport: @escaping @Sendable (URLRequest) async throws -> Data) async -> [ClaudeAccount] {
@@ -316,8 +321,13 @@ public enum NativeClaude {
         var rows = await fetch(credential: load(profile), label: label, transport: transport)
         if rows.first?.usage.error == expired, await refresher.refresh(profile) {
             rows = await fetch(credential: load(profile), label: label, transport: transport)
+            if rows.first?.usage.error == expired { await refresher.renewalFailed(profile) }
         }
-        if rows.first?.usage.error == expired { rows[0].usage.hint = "run claude in \(label)" }
+        if let row = rows.first, row.usage.error == nil {
+            await refresher.renewed(profile)
+        } else if rows.first?.usage.error == expired, await refresher.failures(profile) >= Refresher.signedOutAfter {
+            rows[0].usage.hint = signedOutHint(label)
+        }
         return rows
     }
 
@@ -359,6 +369,10 @@ public enum NativeClaude {
         private let runner: @Sendable (String) async -> Void
         private let now: @Sendable () -> Date
         private var lastRun: [String: Date] = [:]
+        /// Renewal runs in a row after which the login was still expired.
+        private var failed: [String: Int] = [:]
+        /// Consecutive failed renewals that mean the folder is really signed out.
+        static let signedOutAfter = 2
 
         init(now: @escaping @Sendable () -> Date = { Date() }, runner: @escaping @Sendable (String) async -> Void) {
             self.now = now
@@ -373,6 +387,10 @@ public enum NativeClaude {
             await runner(profile)
             return true
         }
+
+        func renewalFailed(_ profile: String) { failed[profile, default: 0] += 1 }
+        func renewed(_ profile: String) { failed[profile] = nil }
+        func failures(_ profile: String) -> Int { failed[profile] ?? 0 }
     }
 
     static let refreshTimeout: TimeInterval = 20

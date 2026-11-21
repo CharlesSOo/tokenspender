@@ -49,7 +49,7 @@ public enum DirectSources {
             switch self {
             case .unreadable: return "auth.json unreadable"
             case .missing: return "not logged in"
-            case .expired: return "expired"
+            case .expired: return "signed out"
             }
         }
     }

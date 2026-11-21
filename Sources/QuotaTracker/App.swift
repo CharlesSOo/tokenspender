@@ -263,32 +263,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The Claude pool is the parent; account rows below it are its breakdown. Codex is never pooled.
         if !claude.isEmpty {
             let pool = ClaudePool(accounts: snapshot.claude)
-            let size = pool.size > 0 ? " · \(pool.size)× Pro" : ""
             m.pool = PopoverModel.Pool(
                 hero: Format.percent(pool.now),
                 low: (pool.now ?? 100) < 20,
-                caption: "available now" + size + (pool.isEstimated ? " · EST." : ""),
+                caption: "token pool",
                 bars: pool.lines.filter { $0.label != "NOW" }.map {
                     PopoverModel.Bar(label: $0.label, fraction: $0.percentLeft / 100, low: $0.percentLeft < 20,
                                      percent: String(format: "%02d%%", Int($0.percentLeft.rounded())))
-                },
-                reset: pool.nextReset.flatMap { w in ResetFormat.countdown(to: w.resetsAt, now: now).map { "\(w.label.lowercased()) resets \($0)" } }
+                }
             )
             m.groups.append(PopoverModel.Group(label: "Accounts", rows: claude.map { k, account in
-                child(name: account.title, usage: account.usage, now: ClaudePool(accounts: [account]).now, row: k + 1, at: now)
+                child(name: account.title, usage: account.usage, hint: account.hint, now: ClaudePool(accounts: [account]).now, row: k + 1, at: now)
             }))
         }
         if let i = rows.firstIndex(where: { $0.provider == "CODEX" && $0.usage.isConfigured }) {
             let usage = rows[i].usage
             m.groups.append(PopoverModel.Group(label: "Codex", rows: [
-                child(name: "~/.codex", usage: usage, now: usage.error == nil ? usage.constraining?.percentLeft : nil, row: i, at: now)
+                child(name: "~/.codex", usage: usage, hint: usage.hint, now: usage.error == nil ? usage.constraining?.percentLeft : nil, row: i, at: now)
             ]))
         }
         m.refreshing = store.isRefreshing
         if store.isRefreshing {
             m.footer = "UPDATING…"
-        } else if let stale = Footer.stale(store.rows.map(\.usage), now: now) {
-            m.footer = stale
+        } else if let offline = Footer.offline(store.rows.map(\.usage), now: now) {
+            m.footer = offline
         } else if let updatedAt = store.updatedAt {
             let minutes = Int(now.timeIntervalSince(updatedAt) / 60)
             m.footer = minutes < 1 ? "UPDATED JUST NOW" : "UPDATED \(minutes)M AGO"
@@ -298,16 +296,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return m
     }
 
-    /// One compact row: NOW on the right, then "5H 42 · WK 95 · resets 3h 48m · 5h burnt in ~1h 10m".
-    private func child(name: String, usage: RowUsage, now value: Double?, row: Int, at now: Date) -> PopoverModel.Child {
+    /// One compact row: NOW on the right, then "5H 42 · WK 95 · resets 3h 48m · 5h burnt in ~1h 10m", or the
+    /// hint when the account is signed out. An error with a hint shows only the hint.
+    private func child(name: String, usage: RowUsage, hint: String?, now value: Double?, row: Int, at now: Date) -> PopoverModel.Child {
         var child = PopoverModel.Child(name: name)
-        if let error = usage.error { child.tag = error; child.hint = usage.hint; return child }
+        child.hint = hint
+        if let error = usage.error { child.tag = hint == nil ? error : nil; return child }
         guard let value, !usage.windows.isEmpty else { child.tag = "loading"; return child }
         child.percent = String(format: "%02d%%", Int(value.rounded()))
         child.fraction = value / 100
         child.low = value < 20
         child.stale = usage.isStale
-        child.hint = usage.hint
         child.detail = usage.windows.map { "\($0.label) \(Int($0.percentLeft.rounded()))" }
         let next = usage.windows.compactMap(\.resetsAt).min()
         if let reset = ResetFormat.countdown(to: next, now: now) { child.detail.append("resets \(reset)") }
@@ -501,12 +500,15 @@ final class Store {
                 ClaudeAccount(profile: "~/.claude", email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60), window("FABLE", 97, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/", plan: "Max"),
                 ClaudeAccount(profile: "~/.claude-work", email: "work@example.com", usage: RowUsage(windows: [window("WK", 61, 2 * 1440 + 3 * 60), window("FABLE", 80, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/", plan: "Ultra")
             ])
-        // QUOTATRACKER_DEMO=stale: the work login expired and could not be renewed; =single: one account.
+        // QUOTATRACKER_DEMO=stale: the work login is being renewed (dimmed); =signedout: renewal kept
+        // failing; =single: one account.
         switch ProcessInfo.processInfo.environment["QUOTATRACKER_DEMO"] {
-        case "stale":
+        case "stale", "signedout":
             fetched.claude[1].usage.isStale = true
             fetched.claude[1].usage.observedAt = now.addingTimeInterval(-3 * 3600)
-            fetched.claude[1].usage.hint = "run claude in ~/.claude-work"
+            if ProcessInfo.processInfo.environment["QUOTATRACKER_DEMO"] == "signedout" {
+                fetched.claude[1].usage.hint = "signed out · run claude in ~/.claude-work"
+            }
         case "single":
             fetched.claude.removeLast()
         default: break

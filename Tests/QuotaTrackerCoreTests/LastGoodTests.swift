@@ -34,9 +34,13 @@ final class LastGoodTests: XCTestCase {
 
     func testNonTransientFailureReplacesCachedRow() {
         let previous = UsageSnapshot(codex: good(70), claude: [claude(good(40))])
-        let fresh = UsageSnapshot(codex: .failure("expired — log in Codex"), claude: [claude(.failure("expired — log in Claude"))])
+        let fresh = UsageSnapshot(codex: .failure(CodexOAuth.Failure.loginRequired.rawValue), claude: [claude(.failure(NativeClaude.Failure.forbidden.rawValue))])
         let merged = LastGood.merge(fresh: fresh, previous: previous)
         XCTAssertEqual(merged, fresh)
+        // An expired Claude login is renewed silently: its last good numbers stay, dimmed.
+        let renewing = LastGood.merge(fresh: UsageSnapshot(claude: [claude(.failure(NativeClaude.Failure.expired.rawValue))]), previous: previous)
+        XCTAssertTrue(renewing.claude[0].usage.isStale)
+        XCTAssertNil(renewing.claude[0].usage.hint)
         var other = RowUsage.failure("timed out", transient: true)
         other.identity = "different"
         XCTAssertEqual(LastGood.merge(fresh: UsageSnapshot(codex: other), previous: UsageSnapshot(codex: good(1, identity: "k"))).codex, other)
@@ -44,19 +48,19 @@ final class LastGoodTests: XCTestCase {
 
     func testExpiredWithHintKeepsPreviousGoodRowWithHint() {
         let previous = UsageSnapshot(claude: [ClaudeAccount(profile: "~/.claude", email: "a@example.com", usage: good(40), id: "claude/a/o", plan: "Ultra")])
-        var expired = RowUsage.failure("expired — log in Claude")
-        expired.hint = "run claude in ~/.claude"
+        var expired = RowUsage.failure(NativeClaude.Failure.expired.rawValue)
+        expired.hint = "signed out · run claude in ~/.claude"
         let merged = LastGood.merge(fresh: UsageSnapshot(claude: [claude(expired, id: nil)]), previous: previous)
         let row = merged.claude[0]
         XCTAssertEqual(row.id, "claude/a/o")
         XCTAssertEqual(row.title, "a@example.com · Ultra")
         XCTAssertNil(row.usage.error)
         XCTAssertTrue(row.usage.isStale)
-        XCTAssertEqual(row.usage.hint, "run claude in ~/.claude")
+        XCTAssertEqual(row.usage.hint, "signed out · run claude in ~/.claude")
         XCTAssertEqual(row.usage.windows.first?.percentLeft, 40)
         // No previous good row: the bare error stays.
         XCTAssertEqual(LastGood.merge(fresh: UsageSnapshot(claude: [claude(expired, id: nil)]), previous: UsageSnapshot()).claude[0].usage.error,
-                       "expired — log in Claude")
+                       NativeClaude.Failure.expired.rawValue)
         // A later success clears the hint.
         let ok = LastGood.merge(fresh: UsageSnapshot(claude: [claude(good(30))]), previous: merged)
         XCTAssertNil(ok.claude[0].usage.hint)

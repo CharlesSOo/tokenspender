@@ -262,13 +262,13 @@ final class NativeClaudeTests: XCTestCase {
         XCTAssertNil(rows.first?.usage.error)
         XCTAssertEqual(rows.first?.email, "native@example.com")
 
-        // Expired again within 10 minutes: no second run; the row names the folder to fix.
+        // Expired again within 10 minutes: no second run, and no hint (no renewal has failed yet).
         box.advance(9 * 60)
         let again = await NativeClaude.fetch(profile: "/Users/x/.claude-me", home: "/Users/x", refresher: refresher,
                                              load: { _ in .failure(.expired) }, transport: transport)
         XCTAssertEqual(box.runs.count, 1)
         XCTAssertEqual(again.first?.usage.error, NativeClaude.Failure.expired.rawValue)
-        XCTAssertEqual(again.first?.usage.hint, "run claude in ~/.claude-me")
+        XCTAssertNil(again.first?.usage.hint)
 
         // Another folder is not throttled by the first; after 10 minutes the first may run again.
         _ = await NativeClaude.fetch(profile: "", home: "/Users/x", refresher: refresher, load: { _ in .failure(.expired) }, transport: transport)
@@ -276,6 +276,32 @@ final class NativeClaudeTests: XCTestCase {
         box.advance(61)
         _ = await NativeClaude.fetch(profile: "/Users/x/.claude-me", home: "/Users/x", refresher: refresher, load: { _ in .failure(.expired) }, transport: transport)
         XCTAssertEqual(box.runs.count, 3)
+    }
+
+    func testSignedOutHintOnlyAfterTwoFailedRenewalsAndClearedBySuccess() async throws {
+        let good = try NativeClaude.credential(fixture("auth"))
+        let profile = try fixture("profile"), usage = try fixture("usage")
+        let box = Box()
+        let refresher = NativeClaude.Refresher(now: { box.now }) { box.run($0) }
+        let transport: @Sendable (URLRequest) async throws -> Data = { $0.url!.lastPathComponent == "profile" ? profile : usage }
+        func poll(_ load: @escaping @Sendable (String) async -> Result<NativeClaude.Credential, NativeClaude.Failure>) async -> RowUsage? {
+            await NativeClaude.fetch(profile: "/Users/x/.claude-me", home: "/Users/x", refresher: refresher, load: load, transport: transport).first?.usage
+        }
+        let dead: @Sendable (String) async -> Result<NativeClaude.Credential, NativeClaude.Failure> = { _ in .failure(.expired) }
+        let first = await poll(dead)
+        XCTAssertNil(first?.hint, "first renewal failed: still renewing silently")
+        box.advance(5 * 60)
+        let throttled = await poll(dead)
+        XCTAssertNil(throttled?.hint, "throttled poll: no new failure")
+        box.advance(5 * 60)
+        let second = await poll(dead)
+        XCTAssertEqual(second?.hint, "signed out · run claude in ~/.claude-me", "second renewal failed")
+        XCTAssertEqual(box.runs.count, 2)
+        let back = await poll { _ in .success(good) }
+        XCTAssertNil(back?.error)
+        box.advance(10 * 60)
+        let later = await poll(dead)
+        XCTAssertNil(later?.hint, "a success resets the count")
     }
 
     func testHTTP401AlsoRunsClaudeAndOtherFailuresDoNot() async throws {

@@ -13,12 +13,10 @@ struct PopoverModel {
         /// Pool NOW, e.g. "55%".
         var hero: String
         var low = false
-        /// "available now · 20× Pro", "… · EST." when a plan is unknown.
+        /// "token pool".
         var caption: String
         /// WK, then one bar per model-scoped weekly limit.
         var bars: [Bar] = []
-        /// Earliest pooled reset, e.g. "5h resets 3h 48m".
-        var reset: String?
     }
     /// A compact child row: name and NOW on one line, a thin bar, then one muted detail line.
     struct Child {
@@ -57,9 +55,11 @@ final class PopoverView: NSView {
     private static let pad: CGFloat = 20
     private static let indent: CGFloat = 12
     /// Spacing scale (4 pt steps), smallest to largest: lines within one row (name → bar → detail, wrapped
-    /// lines); rows (accounts, pool bars); sections (pool, accounts, Codex, footer). Gaps run baseline to cap top.
+    /// lines, hero → caption); a group label to its first row and pool bar to bar; rows (accounts); sections
+    /// (pool, accounts, Codex, footer), split by a hairline. Gaps run baseline to cap top.
     private static let lineGap: CGFloat = 8
-    private static let rowGap: CGFloat = 16
+    private static let labelGap: CGFloat = 12
+    private static let rowGap: CGFloat = 20
     private static let sectionGap: CGFloat = 24
     private static let poolBarHeight: CGFloat = 8
     private static let childBarHeight: CGFloat = 4
@@ -100,8 +100,8 @@ final class PopoverView: NSView {
     override func accessibilityChildren() -> [Any]? {
         var labels: [String] = []
         if let pool = model.pool {
-            labels.append((["Claude pool: \(pool.hero) \(pool.caption)"] + pool.bars.map { "\($0.label): \($0.percent) remaining" }
-                           + [pool.reset].compactMap { $0 }).joined(separator: ", "))
+            labels.append((["Claude \(pool.caption): \(pool.hero)"] + pool.bars.map { "\($0.label): \($0.percent) remaining" })
+                .joined(separator: ", "))
         }
         for group in model.groups {
             labels.append(group.label)
@@ -151,7 +151,7 @@ final class PopoverView: NSView {
         .monospacedSystemFont(ofSize: size, weight: weight)
     }
     /// Four sizes: hero > pool rows > child rows, labels and metadata (metadata told apart by colour).
-    private static let hero = mono(32, .light)
+    private static let hero = mono(26, .light)
     private static let poolRow = mono(12)
     private static let childRow = mono(10)
     private static let label = mono(10, .medium)
@@ -209,26 +209,27 @@ final class PopoverView: NSView {
             section()
             y = self.pool(pool, top: y, draw: draw)
         }
-        for (index, group) in model.groups.enumerated() {
-            section()
-            if index == 0 && model.pool != nil {
-                // Hairline: the pool above is the parent of everything below.
+        for group in model.groups {
+            if !first {
+                // Hairline between sections; the pool above is the parent of the accounts below.
+                y += Self.sectionGap
                 if draw {
                     Palette.tertiaryText.withAlphaComponent(0.5).setFill()
                     NSRect(x: pad, y: y, width: Self.width - 2 * pad, height: 1 / (window?.backingScaleFactor ?? 2)).fill()
                 }
-                y += Self.sectionGap
             }
+            section()
             y = put(Self.caps(group.label, Palette.secondaryText), x: pad, top: y, draw: draw)
-            for row in group.rows {
-                y = child(row, top: y + Self.rowGap, draw: draw)
+            for (index, row) in group.rows.enumerated() {
+                y = child(row, top: y + (index == 0 ? Self.labelGap : Self.rowGap), draw: draw)
             }
         }
 
-        // Footer: status text, then settings, refresh and quit glyphs centred on its caps.
-        section()
+        // Footer: status text, then settings, refresh and quit glyphs centred on its caps. The gap above is
+        // measured to the glyphs' top, which stand taller than the caps.
         let glyph: CGFloat = 14
         let capHeight = Self.label.capHeight
+        if !first { y += Self.sectionGap + (glyph - capHeight) / 2 }
         quitRect = NSRect(x: Self.width - pad - glyph, y: y + capHeight / 2 - glyph / 2, width: glyph, height: glyph)
         refreshRect = quitRect.offsetBy(dx: -(glyph + 12), dy: 0)
         settingsRect = refreshRect.offsetBy(dx: -(glyph + 12), dy: 0)
@@ -236,7 +237,7 @@ final class PopoverView: NSView {
         refreshButton.frame = refreshRect.insetBy(dx: -3, dy: -3)
         quitButton.frame = quitRect.insetBy(dx: -3, dy: -3)
         refreshButton.isEnabled = !model.refreshing
-        // A long status ("LOGIN EXPIRED · UPDATED 3H AGO") wraps between its parts instead of meeting the glyphs.
+        // A long status ("OFFLINE · UPDATED 23H AGO") wraps between its parts instead of meeting the glyphs.
         let lines = wrap(model.footer.components(separatedBy: " · "), width: settingsRect.minX - 12 - pad) { Self.caps($0) }
         for (index, line) in lines.enumerated() {
             y = put(Self.caps(line), x: pad, top: index == 0 ? y : y + Self.lineGap, draw: draw)
@@ -257,17 +258,16 @@ final class PopoverView: NSView {
         return lines
     }
 
-    /// Hero NOW, caption, then WK/model bars with labels in a fixed column, then the pool's reset line.
+    /// Hero NOW, caption, then WK/model bars with labels in a fixed column.
     private func pool(_ pool: PopoverModel.Pool, top: CGFloat, draw: Bool) -> CGFloat {
         let pad = Self.pad
-        var y = put(Self.caps("Claude pool", Palette.secondaryText), x: pad, top: top, draw: draw)
-        y = put(Self.text(pool.hero, Self.hero, pool.low ? Palette.terracotta : Palette.primaryText), x: pad - 1, top: y + Self.rowGap, draw: draw)
+        var y = put(Self.text(pool.hero, Self.hero, pool.low ? Palette.terracotta : Palette.primaryText), x: pad - 1, top: top, draw: draw)
         y = put(Self.text(pool.caption, Self.childRow, Palette.secondaryText), x: pad, top: y + Self.lineGap + 4, draw: draw)
         let labels = pool.bars.map { Self.text($0.label, Self.poolRow, Palette.secondaryText) }
         let widest = labels.map { $0.size().width }.max() ?? 0
         let barStart = pad + max(48, ((widest + 12) / 4).rounded(.up) * 4)
         for (index, bar) in pool.bars.enumerated() {
-            let top = y + (index == 0 ? Self.rowGap + 4 : Self.rowGap - 4)
+            let top = y + (index == 0 ? Self.rowGap : Self.labelGap)
             put(labels[index], x: pad, top: top, draw: draw)
             _ = putRight(Self.text(bar.percent, Self.poolRow, Palette.primaryText), top: top, draw: draw)
             let capHeight = Self.poolRow.capHeight
@@ -276,9 +276,6 @@ final class PopoverView: NSView {
                             fraction: bar.fraction, low: bar.low)
             }
             y = top + capHeight
-        }
-        if let reset = pool.reset {
-            y = put(Self.text(reset, Self.childRow, Palette.tertiaryText), x: pad, top: y + Self.rowGap - 4, draw: draw)
         }
         return y
     }
