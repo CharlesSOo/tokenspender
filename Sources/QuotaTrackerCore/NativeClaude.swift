@@ -2,7 +2,8 @@ import Foundation
 import CryptoKit
 
 /// Read-only Claude Code OAuth integration. Parsing/path conventions adapted from CodexBar (MIT).
-/// Never refreshes, persists, logs, or exports credentials; Claude Code owns login and renewal.
+/// Never writes, persists, logs, or exports credentials; Claude Code owns login and renewal. An expired
+/// login is renewed by running Claude Code itself (`claude -p /usage`, no model call) for that folder.
 public enum NativeClaude {
     enum Failure: String, Error {
         case missing = "not logged in"
@@ -16,6 +17,9 @@ public enum NativeClaude {
         case timeout = "timed out"
         case rateLimited = "rate limited"
         case forbidden = "Claude access denied"
+
+        /// Offline, timeouts, 5xx and 429; auth and credential failures are not.
+        var isTransient: Bool { [.network, .timeout, .rateLimited].contains(self) }
     }
 
     struct Location: Equatable {
@@ -44,13 +48,17 @@ public enum NativeClaude {
                         file: (profile.isEmpty ? home + "/.claude" : profile) + "/.credentials.json")
     }
 
-    /// Every Claude Code config profile: default first, then the environment's profile and each
-    /// `~/.claude-*` directory containing `.claude.json`, deduped and sorted.
-    static func profiles(environment: [String: String], home: String, entries: [String],
+    /// Every Claude Code config folder: default first, then the environment's profile, each
+    /// `~/.claude-*` directory containing `.claude.json` and each user-added folder, deduped and sorted.
+    static func profiles(environment: [String: String], home: String, entries: [String], folders: [String] = [],
                          hasConfig: (String) -> Bool) -> [String] {
         var paths = Set<String>()
         let env = environmentProfile(environment)
         if !env.isEmpty { paths.insert(env) }
+        for folder in folders {
+            let path = folder.count > 1 && folder.hasSuffix("/") ? String(folder.dropLast()) : folder
+            if path != home + "/.claude" { paths.insert(path) }
+        }
         for name in entries where name.hasPrefix(".claude-") {
             let path = home + "/" + name
             if hasConfig(path) { paths.insert(path) }
@@ -163,28 +171,55 @@ public enum NativeClaude {
 
     private struct Profile: Decodable {
         struct Account: Decodable { let uuid: UUID; let email: String? }
-        struct Organization: Decodable { let uuid: UUID }
+        struct Organization: Decodable { let uuid: UUID; let plan_display_name: String? }
         let account: Account
         let organization: Organization
     }
 
     static func account(profile data: Data, usage: RowUsage, label: String = "~/.claude") throws -> ClaudeAccount {
         guard let profile = try? JSONDecoder().decode(Profile.self, from: data) else { throw Failure.profile }
+        let plan = profile.organization.plan_display_name.flatMap { $0.isEmpty ? nil : $0 }
         return ClaudeAccount(profile: label, email: profile.account.email ?? "Claude Code", usage: usage,
-                             id: "claude/\(profile.account.uuid.uuidString.lowercased())/\(profile.organization.uuid.uuidString.lowercased())")
+                             id: "claude/\(profile.account.uuid.uuidString.lowercased())/\(profile.organization.uuid.uuidString.lowercased())",
+                             plan: plan)
     }
 
     private struct Usage: Decodable {
         struct Window: Decodable { let utilization: Double?; let resets_at: String? }
+        /// The server's list of meters that apply: `session`, `weekly_all`, `weekly_scoped` (per model).
+        struct Limit: Decodable {
+            struct Scope: Decodable { struct Model: Decodable { let display_name: String? }; let model: Model? }
+            let kind: String?; let percent: Double?; let resets_at: String?; let scope: Scope?
+        }
         let five_hour: Window?
         let seven_day: Window?
+        let limits: [Limit]?
     }
 
+    /// Windows come only from the server's `limits` (a plan without a 5-hour limit has no `session`);
+    /// `five_hour`/`seven_day` are used only when `limits` is absent.
     static func usage(_ data: Data, now: Date = Date()) throws -> RowUsage {
         guard let usage = try? JSONDecoder().decode(Usage.self, from: data) else { throw Failure.usage }
-        let windows = [("5H", usage.five_hour), ("WK", usage.seven_day)].compactMap { label, value -> UsageWindow? in
-            guard let used = value?.utilization, used.isFinite else { return nil }
-            return UsageWindow(label: label, percentLeft: Parse.left(used), resetsAt: value?.resets_at.flatMap(Parse.date))
+        let windows: [UsageWindow]
+        if let limits = usage.limits {
+            windows = limits.compactMap { limit -> UsageWindow? in
+                guard let used = limit.percent, used.isFinite else { return nil }
+                let label: String
+                switch limit.kind {
+                case "session": label = "5H"
+                case "weekly_all": label = "WK"
+                case "weekly_scoped":
+                    guard let name = limit.scope?.model?.display_name, !name.isEmpty else { return nil }
+                    label = name.uppercased()
+                default: return nil
+                }
+                return UsageWindow(label: label, percentLeft: Parse.left(used), resetsAt: limit.resets_at.flatMap(Parse.date))
+            }
+        } else {
+            windows = [("5H", usage.five_hour), ("WK", usage.seven_day)].compactMap { label, value -> UsageWindow? in
+                guard let used = value?.utilization, used.isFinite else { return nil }
+                return UsageWindow(label: label, percentLeft: Parse.left(used), resetsAt: value?.resets_at.flatMap(Parse.date))
+            }
         }
         guard !windows.isEmpty else { throw Failure.usage }
         return RowUsage(windows: windows, observedAt: now)
@@ -232,7 +267,10 @@ public enum NativeClaude {
             let (data, result) = try await session.data(for: req)
             return try response(data, status: (result as? HTTPURLResponse)?.statusCode ?? 0)
         } catch let failure as Failure { throw failure }
-        catch { throw (error as? URLError)?.code == .timedOut ? Failure.timeout : Failure.network }
+        catch {
+            guard DirectSources.isTransient(error) else { throw Failure.usage }
+            throw (error as? URLError)?.code == .timedOut ? Failure.timeout : Failure.network
+        }
     }
 
     static func fetch(credential: Result<Credential, Failure>, label: String = "~/.claude",
@@ -252,7 +290,7 @@ public enum NativeClaude {
     }
 
     private static func failure(_ error: Failure, label: String) -> ClaudeAccount {
-        ClaudeAccount(profile: label, email: label, usage: .failure(error.rawValue))
+        ClaudeAccount(profile: label, email: label, usage: .failure(error.rawValue, transient: error.isTransient))
     }
 
     /// Profile order is kept; a verified account seen in several profiles keeps one row,
@@ -268,14 +306,29 @@ public enum NativeClaude {
         return result
     }
 
+    /// One folder's row. An expired login (past `expiresAt` or HTTP 401) is renewed through the refresher,
+    /// then the Keychain is read again; if it still fails the row carries a hint naming the folder.
+    static func fetch(profile: String, home: String, refresher: Refresher,
+                      load: @escaping @Sendable (String) async -> Result<Credential, Failure>,
+                      transport: @escaping @Sendable (URLRequest) async throws -> Data) async -> [ClaudeAccount] {
+        let label = label(profile: profile, home: home)
+        let expired = Failure.expired.rawValue
+        var rows = await fetch(credential: load(profile), label: label, transport: transport)
+        if rows.first?.usage.error == expired, await refresher.refresh(profile) {
+            rows = await fetch(credential: load(profile), label: label, transport: transport)
+        }
+        if rows.first?.usage.error == expired { rows[0].usage.hint = "run claude in \(label)" }
+        return rows
+    }
+
     /// Keychain reads stay serialized on keychainQueue; network fetches run concurrently.
-    static func fetch(profiles: [String], home: String,
+    static func fetch(profiles: [String], home: String, refresher: Refresher,
                       load: @escaping @Sendable (String) async -> Result<Credential, Failure>,
                       transport: @escaping @Sendable (URLRequest) async throws -> Data) async -> [ClaudeAccount] {
         let rows = await withTaskGroup(of: (Int, [ClaudeAccount]).self) { group in
             for (index, profile) in profiles.enumerated() {
                 group.addTask {
-                    (index, await fetch(credential: load(profile), label: label(profile: profile, home: home), transport: transport))
+                    (index, await fetch(profile: profile, home: home, refresher: refresher, load: load, transport: transport))
                 }
             }
             var rows = [[ClaudeAccount]](repeating: [], count: profiles.count)
@@ -285,13 +338,98 @@ public enum NativeClaude {
         return merge(rows)
     }
 
-    public static func fetch() async -> [ClaudeAccount] {
+    static let refresher = Refresher { await runClaude(profile: $0) }
+
+    /// `folders`: user-added config folders, on top of the auto-detected ones.
+    public static func fetch(folders: [String] = []) async -> [ClaudeAccount] {
         let home = NSHomeDirectory()
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: home)) ?? []
-        let list = profiles(environment: ProcessInfo.processInfo.environment, home: home, entries: entries) {
+        let list = profiles(environment: ProcessInfo.processInfo.environment, home: home, entries: entries, folders: folders) {
             FileManager.default.fileExists(atPath: $0 + "/.claude.json")
         }
-        return await fetch(profiles: list, home: home, load: { await load(profile: $0) },
+        return await fetch(profiles: list, home: home, refresher: refresher, load: { await load(profile: $0) },
                            transport: { try await send($0) })
+    }
+
+    // MARK: - Renewal through Claude Code
+
+    /// Runs the injected renewal at most once per folder per `interval`.
+    actor Refresher {
+        static let interval: TimeInterval = 600
+        private let runner: @Sendable (String) async -> Void
+        private let now: @Sendable () -> Date
+        private var lastRun: [String: Date] = [:]
+
+        init(now: @escaping @Sendable () -> Date = { Date() }, runner: @escaping @Sendable (String) async -> Void) {
+            self.now = now
+            self.runner = runner
+        }
+
+        /// False when throttled (nothing was run).
+        func refresh(_ profile: String) async -> Bool {
+            let time = now()
+            if let last = lastRun[profile], time.timeIntervalSince(last) < Self.interval { return false }
+            lastRun[profile] = time
+            await runner(profile)
+            return true
+        }
+    }
+
+    static let refreshTimeout: TimeInterval = 20
+
+    /// `claude -p /usage` makes no model call but renews the folder's login the way Claude Code always does.
+    /// The default folder gets no `CLAUDE_CONFIG_DIR`; output is discarded.
+    static func runClaude(profile: String) async {
+        guard let claude = await claudePath() else { return }
+        var environment = ProcessInfo.processInfo.environment
+        environment["CLAUDE_CONFIG_DIR"] = profile.isEmpty ? nil : profile
+        _ = await run(claude, ["-p", "/usage", "--output-format", "json"], environment: environment, timeout: refreshTimeout)
+    }
+
+    static func claudePath() async -> String? {
+        let home = NSHomeDirectory()
+        for path in [home + "/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
+            where FileManager.default.isExecutableFile(atPath: path) { return path }
+        let output = await run("/bin/zsh", ["-lc", "command -v claude"], environment: ProcessInfo.processInfo.environment,
+                               timeout: refreshTimeout, captureOutput: true)
+        let path = output.flatMap { String(data: $0, encoding: .utf8) }?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return path.hasPrefix("/") ? path : nil
+    }
+
+    /// Runs a process off the main thread with stdin closed; terminated after `timeout`.
+    /// Returns stdout when captured and the process exited 0.
+    private static func run(_ executable: String, _ arguments: [String], environment: [String: String],
+                            timeout: TimeInterval, captureOutput: Bool = false) async -> Data? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = arguments
+                process.environment = environment
+                process.standardInput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                let stdout = Pipe()
+                process.standardOutput = captureOutput ? stdout : FileHandle.nullDevice
+                let done = DispatchSemaphore(value: 0)
+                process.terminationHandler = { _ in done.signal() }
+                do { try process.run() } catch { return continuation.resume(returning: nil) }
+                var data: Data?
+                let reader = DispatchGroup()
+                if captureOutput {
+                    reader.enter()
+                    DispatchQueue.global(qos: .utility).async {
+                        data = try? stdout.fileHandleForReading.read(upToCount: 65_536)
+                        reader.leave()
+                    }
+                }
+                if done.wait(timeout: .now() + timeout) == .timedOut {
+                    process.terminate()
+                    _ = done.wait(timeout: .now() + 1)
+                    return continuation.resume(returning: nil)
+                }
+                _ = reader.wait(timeout: .now() + 1)
+                continuation.resume(returning: process.terminationStatus == 0 ? data : nil)
+            }
+        }
     }
 }

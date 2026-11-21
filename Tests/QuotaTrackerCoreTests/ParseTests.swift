@@ -12,7 +12,7 @@ final class ParseTests: XCTestCase {
         func row(_ five: Double, _ week: Double) -> RowUsage {
             RowUsage(windows: [UsageWindow(label: "5H", percentLeft: five, resetsAt: nil), UsageWindow(label: "WK", percentLeft: week, resetsAt: nil)])
         }
-        let snapshot = UsageSnapshot(codex: row(80, 40), claude: [ClaudeAccount(profile: "~/.claude", email: "a@example.com", usage: row(100, 0)), ClaudeAccount(profile: "~/.claude-b", email: "b@example.com", usage: row(60, 80))], kimi: .notConfigured)
+        let snapshot = UsageSnapshot(codex: row(80, 40), claude: [ClaudeAccount(profile: "~/.claude", email: "a@example.com", usage: row(100, 0)), ClaudeAccount(profile: "~/.claude-b", email: "b@example.com", usage: row(60, 80))])
         XCTAssertEqual(MenuLabel.text(mode: .availableNow, snapshot: snapshot), "33%")
         XCTAssertEqual(MenuLabel.text(mode: .lowest, snapshot: snapshot), "0%")
         XCTAssertEqual(MenuLabel.text(mode: .claudePool, snapshot: snapshot), "30%")

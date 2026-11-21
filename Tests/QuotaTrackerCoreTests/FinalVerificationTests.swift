@@ -3,27 +3,8 @@ import XCTest
 @testable import QuotaTrackerCore
 
 final class FinalVerificationTests: XCTestCase {
-    func testMalformedPresentKimiOAuthIsVisibleError() {
-        for json in [
-            #"{"kimi-coding":{"type":"oauth"}}"#,
-            #"{"kimi-coding":{"type":"oauth","access":""}}"#,
-            #"{"kimi-coding":{"type":"oauth","access":42}}"#,
-            #"{"kimi-coding":{"type":"oauth","access":"fake","expires":"broken"}}"#,
-            #"{"kimi-coding":null}"#
-        ] {
-            XCTAssertEqual(DirectSources.piCredential("kimi-coding", authJSON: Data(json.utf8)), .failure(.unreadable), json)
-        }
-    }
-
     func testMalformedPresentCodexEmptyAccessIsVisibleError() {
         XCTAssertEqual(DirectSources.codexCredential(authJSON: Data(#"{"tokens":{"access_token":""}}"#.utf8)), .failure(.unreadable))
-    }
-
-    func testMissingKimiAndUnrelatedMalformedEntryRemainHidden() {
-        for json in ["{}", #"{"other":{"type":"oauth","access":42}}"#] {
-            XCTAssertEqual(DirectSources.piCredential("kimi-coding", authJSON: Data(json.utf8)), .failure(.missing))
-        }
-        XCTAssertEqual(DirectSources.piCredential("kimi-coding", authJSON: Data(#"{"other":null,"kimi-coding":{"type":"oauth","access":"fake","expires":0}}"#.utf8)), .failure(.expired))
     }
 
     func testETAMinimumSpanAndResetBoundary() throws {

@@ -27,7 +27,7 @@ final class NativeClaudeTests: XCTestCase {
         XCTAssertEqual(id, "claude/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002")
         XCTAssertEqual(accounts[0].usage.windows.map(\.percentLeft), [96, 0])
         XCTAssertNotNil(accounts[0].usage.windows[0].resetsAt)
-        let snapshot = UsageSnapshot(codex: .notConfigured, claude: accounts, kimi: .notConfigured)
+        let snapshot = UsageSnapshot(codex: .notConfigured, claude: accounts)
         XCTAssertEqual(DisplaySelection.claudeAccount(id).text(snapshot: snapshot), "0%")
         XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot, selected: .mode(.claudePool)).count, 5)
     }
@@ -62,8 +62,9 @@ final class NativeClaudeTests: XCTestCase {
             "": .failure(.expired), "/Users/x/.claude-a": .failure(.missing),
             "/Users/x/.claude-b": .success(auth), "/Users/x/.claude-c": .success(auth),
             "/Users/x/.claude-d": .failure(.keychain)]
+        let refresher = NativeClaude.Refresher { _ in }
         let accounts = await NativeClaude.fetch(profiles: ["", "/Users/x/.claude-a", "/Users/x/.claude-b", "/Users/x/.claude-c", "/Users/x/.claude-d"],
-                                                home: home, load: { credentials[$0]! }) { request in
+                                                home: home, refresher: refresher, load: { credentials[$0]! }) { request in
             request.url!.lastPathComponent == "profile" ? profile : usage
         }
         XCTAssertEqual(accounts.map(\.profile), ["~/.claude", "~/.claude-b", "~/.claude-d"])
@@ -182,5 +183,128 @@ final class NativeClaudeTests: XCTestCase {
         }
         XCTAssertThrowsError(try NativeClaude.usage(json("{}")))
         XCTAssertThrowsError(try NativeClaude.usage(json(#"{"five_hour":{"utilization":"bad"}}"#)))
+    }
+
+    func testModelScopedWeeklyLimitBecomesItsOwnWindow() throws {
+        let body = #"""
+        {"five_hour":{"utilization":20,"resets_at":"2030-01-01T05:00:00Z"},
+         "seven_day":{"utilization":57,"resets_at":"2030-01-07T08:00:00.739572+00:00"},
+         "limits":[{"kind":"session","percent":20},{"kind":"weekly_all","percent":57},
+                   {"kind":"weekly_scoped","percent":79,"resets_at":"2030-01-07T08:00:00.739718+00:00",
+                    "scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}]}
+        """#
+        let usage = try NativeClaude.usage(json(body))
+        XCTAssertEqual(usage.windows.map(\.label), ["5H", "WK", "FABLE"])
+        XCTAssertEqual(usage.windows.map(\.percentLeft), [80, 43, 21])
+        XCTAssertEqual(usage.constraining?.label, "FABLE")
+        let now = try XCTUnwrap(Parse.date("2030-01-01T00:00:00Z"))
+        XCTAssertEqual(ResetFormat.line(for: usage.windows, now: now), "resets 6d 8h")
+    }
+
+    // MARK: Server-listed meters (scrubbed real payloads)
+
+    private func real(_ name: String) throws -> Data {
+        try Data(contentsOf: XCTUnwrap(Bundle.module.url(forResource: "claude-real-" + name, withExtension: "json", subdirectory: "Fixtures")))
+    }
+
+    func testRealPayloadWithSessionHasFiveHourWeeklyAndModel() throws {
+        let usage = try NativeClaude.usage(real("usage"))
+        XCTAssertEqual(usage.windows.map(\.label), ["5H", "WK", "FABLE"])
+        XCTAssertEqual(usage.windows.map(\.percentLeft), [97, 96, 97])
+        XCTAssertNotNil(usage.windows[0].resetsAt)
+    }
+
+    func testRealPayloadWithoutSessionHasNoFiveHour() throws {
+        let usage = try NativeClaude.usage(real("usage-no-session"))
+        XCTAssertEqual(usage.windows.map(\.label), ["WK", "FABLE"])
+        // limits is authoritative even if a stale five_hour object were still present.
+        XCTAssertEqual(try NativeClaude.usage(json(#"{"five_hour":{"utilization":5},"limits":[{"kind":"weekly_all","percent":10}]}"#)).windows.map(\.label), ["WK"])
+    }
+
+    func testPlanLabelParsedAndFollowsEachPoll() async throws {
+        let credential = try NativeClaude.credential(fixture("auth"))
+        let ultra = try real("profile"), usage = try real("usage")
+        let max = Data(String(decoding: ultra, as: UTF8.self).replacingOccurrences(of: #""plan_display_name": "Ultra""#, with: #""plan_display_name": "Max""#).utf8)
+        XCTAssertNotEqual(max, ultra)
+        let first = await NativeClaude.fetch(credential: .success(credential)) { $0.url!.lastPathComponent == "profile" ? ultra : usage }
+        XCTAssertEqual(first.first?.plan, "Ultra")
+        XCTAssertEqual(first.first?.title, "ultra@example.com · Ultra")
+        let second = await NativeClaude.fetch(credential: .success(credential)) { $0.url!.lastPathComponent == "profile" ? max : usage }
+        XCTAssertEqual(second.first?.title, "ultra@example.com · Max")
+        XCTAssertNil(try NativeClaude.account(profile: fixture("profile"), usage: RowUsage()).plan)
+    }
+
+    // MARK: Renewal through Claude Code
+
+    private final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: [String] = []
+        private var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        var runs: [String] { lock.withLock { value } }
+        func run(_ profile: String) { lock.withLock { value.append(profile) } }
+        var now: Date { lock.withLock { clock } }
+        func advance(_ seconds: TimeInterval) { lock.withLock { clock += seconds } }
+    }
+
+    func testExpiredCredentialRunsClaudeOnceThenRereadsAndThrottles() async throws {
+        let good = try NativeClaude.credential(fixture("auth"))
+        let profile = try fixture("profile"), usage = try fixture("usage")
+        let box = Box()
+        let refresher = NativeClaude.Refresher(now: { box.now }) { box.run($0) }
+        // The Keychain holds a dead token until Claude Code has run for this folder.
+        let renewedAfter = { @Sendable (count: Int) -> Result<NativeClaude.Credential, NativeClaude.Failure> in
+            box.runs.count > count ? .success(good) : .failure(.expired)
+        }
+        let transport: @Sendable (URLRequest) async throws -> Data = { $0.url!.lastPathComponent == "profile" ? profile : usage }
+        let rows = await NativeClaude.fetch(profile: "/Users/x/.claude-me", home: "/Users/x", refresher: refresher,
+                                            load: { _ in renewedAfter(0) }, transport: transport)
+        XCTAssertEqual(box.runs, ["/Users/x/.claude-me"])
+        XCTAssertNil(rows.first?.usage.error)
+        XCTAssertEqual(rows.first?.email, "native@example.com")
+
+        // Expired again within 10 minutes: no second run; the row names the folder to fix.
+        box.advance(9 * 60)
+        let again = await NativeClaude.fetch(profile: "/Users/x/.claude-me", home: "/Users/x", refresher: refresher,
+                                             load: { _ in .failure(.expired) }, transport: transport)
+        XCTAssertEqual(box.runs.count, 1)
+        XCTAssertEqual(again.first?.usage.error, NativeClaude.Failure.expired.rawValue)
+        XCTAssertEqual(again.first?.usage.hint, "run claude in ~/.claude-me")
+
+        // Another folder is not throttled by the first; after 10 minutes the first may run again.
+        _ = await NativeClaude.fetch(profile: "", home: "/Users/x", refresher: refresher, load: { _ in .failure(.expired) }, transport: transport)
+        XCTAssertEqual(box.runs, ["/Users/x/.claude-me", ""])
+        box.advance(61)
+        _ = await NativeClaude.fetch(profile: "/Users/x/.claude-me", home: "/Users/x", refresher: refresher, load: { _ in .failure(.expired) }, transport: transport)
+        XCTAssertEqual(box.runs.count, 3)
+    }
+
+    func testHTTP401AlsoRunsClaudeAndOtherFailuresDoNot() async throws {
+        let good = try NativeClaude.credential(fixture("auth"))
+        let profile = try fixture("profile"), usage = try fixture("usage")
+        let box = Box()
+        let refresher = NativeClaude.Refresher(now: { box.now }) { box.run($0) }
+        let rows = await NativeClaude.fetch(profile: "", home: "/Users/x", refresher: refresher, load: { _ in .success(good) }) { request in
+            if box.runs.isEmpty { throw NativeClaude.Failure.expired }
+            return request.url!.lastPathComponent == "profile" ? profile : usage
+        }
+        XCTAssertEqual(box.runs, [""])
+        XCTAssertNil(rows.first?.usage.error)
+        XCTAssertNil(rows.first?.usage.hint)
+        for failure in [NativeClaude.Failure.network, .forbidden, .keychain, .missing] {
+            _ = await NativeClaude.fetch(profile: "/Users/x/.claude-z", home: "/Users/x", refresher: refresher, load: { _ in .failure(failure) }) { _ in Data() }
+        }
+        XCTAssertEqual(box.runs, [""])
+    }
+
+    func testUserAddedFoldersJoinProfilesDeduped() {
+        let home = "/Users/x"
+        let auto = NativeClaude.profiles(environment: [:], home: home, entries: [".claude-me"], folders: [], hasConfig: { _ in true })
+        XCTAssertEqual(auto, ["", "/Users/x/.claude-me"])
+        let added = NativeClaude.profiles(environment: ["CLAUDE_CONFIG_DIR": "/env"], home: home, entries: [".claude-me"],
+                                          folders: ["/work/claude", "/Users/x/.claude-me", "/Users/x/.claude-me/", "/Users/x/.claude", "/env"],
+                                          hasConfig: { _ in true })
+        XCTAssertEqual(added, ["", "/Users/x/.claude-me", "/env", "/work/claude"])
+        // Removing the folder from the setting drops it.
+        XCTAssertEqual(NativeClaude.profiles(environment: [:], home: home, entries: [".claude-me"], folders: [], hasConfig: { _ in true }), auto)
     }
 }

@@ -32,29 +32,6 @@ final class DirectSourcesTests: XCTestCase {
         XCTAssertFalse(row.isConfigured)
     }
 
-    func testKimiUsageMapping() throws {
-        let row = DirectSources.parseKimi(try fixture("kimi-code-usages"))
-        XCTAssertNil(row.error)
-        XCTAssertEqual(row.windows.map(\.label), ["5H", "WK"])
-        XCTAssertEqual(row.windows[0].percentLeft, 37.5)
-        XCTAssertEqual(row.windows[0].resetsAt, iso.date(from: "2026-10-08T20:15:44Z"))
-        XCTAssertEqual(row.windows[1].percentLeft, 87.5)
-        XCTAssertEqual(row.windows[1].resetsAt, iso.date(from: "2026-10-13T00:00:00Z"))
-        XCTAssertEqual(row.constraining?.label, "5H")
-    }
-
-    func testPiAuthParsing() throws {
-        let data = try fixture("pi-auth")
-        let now = Date(timeIntervalSince1970: 1_791_454_000)
-        let kimi = try DirectSources.piCredential("kimi-coding", authJSON: data, now: now).get()
-        XCTAssertEqual(kimi.access, "fake-kimi-access")
-        XCTAssertEqual(kimi.expires, Date(timeIntervalSince1970: 4_102_444_800))
-        XCTAssertEqual(DirectSources.piCredential("openai", authJSON: data, now: now), .failure(.expired))
-        XCTAssertEqual(DirectSources.piCredential("vercel-ai-gateway", authJSON: data, now: now), .failure(.missing))
-        XCTAssertEqual(DirectSources.piCredential("nope", authJSON: data, now: now), .failure(.missing))
-        XCTAssertEqual(DirectSources.piCredential("openai", authJSON: Data("nope".utf8), now: now), .failure(.unreadable))
-    }
-
     func testCodexAuthParsing() throws {
         let now = Date(timeIntervalSince1970: 1_791_454_000)
         let cred = try DirectSources.codexCredential(authJSON: try fixture("codex-auth"), now: now).get()

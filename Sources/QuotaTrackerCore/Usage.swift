@@ -1,6 +1,6 @@
 import Foundation
 
-public struct UsageWindow: Equatable, Sendable {
+public struct UsageWindow: Equatable, Sendable, Codable {
     public let label: String
     public let percentLeft: Double
     public let resetsAt: Date?
@@ -12,14 +12,20 @@ public struct UsageWindow: Equatable, Sendable {
     }
 }
 
-public struct RowUsage: Equatable, Sendable {
+public struct RowUsage: Equatable, Sendable, Codable {
     public var windows: [UsageWindow] = []
     public var error: String?
+    /// The error is a connectivity/server hiccup (offline, timeout, 5xx, 429); last good data may stand in.
+    public var isTransient = false
+    /// Last good data shown in place of a failure; `observedAt` is when it was fetched.
+    public var isStale = false
     /// False when the provider has no credentials at all (as opposed to expired ones); such rows are hidden.
     public var isConfigured = true
     /// Source observation time, not the time a cached response was read.
     public var observedAt: Date?
     public var identity: String?
+    /// What the user can do to recover a stale row, e.g. "run claude in ~/.claude".
+    public var hint: String?
 
     /// The window with the least left.
     public var constraining: UsageWindow? { windows.min { $0.percentLeft < $1.percentLeft } }
@@ -31,53 +37,49 @@ public struct RowUsage: Equatable, Sendable {
         self.observedAt = observedAt
     }
 
-    public static func failure(_ message: String) -> RowUsage { RowUsage(error: message) }
+    public static func failure(_ message: String, transient: Bool = false) -> RowUsage {
+        var row = RowUsage(error: message)
+        row.isTransient = transient
+        return row
+    }
     public static let notConfigured = RowUsage(error: "not configured", isConfigured: false)
 }
 
 /// One Claude Code config profile's account. `profile` is the config dir label (e.g. "~/.claude-me");
 /// `email` is only a display name.
-public struct ClaudeAccount: Equatable, Sendable {
+public struct ClaudeAccount: Equatable, Sendable, Codable {
     public let profile: String
     public let email: String
     public var usage: RowUsage
     /// Account UUID + organization UUID from the native OAuth profile; nil if unverified.
     public let id: String?
+    /// Current plan from the OAuth profile (e.g. "Ultra"), fetched every poll.
+    public var plan: String?
 
-    public init(profile: String, email: String, usage: RowUsage, id: String? = nil) {
+    public init(profile: String, email: String, usage: RowUsage, id: String? = nil, plan: String? = nil) {
         self.profile = profile
         self.email = email
         self.usage = usage
         self.id = id
+        self.plan = plan
     }
+
+    /// Row title: "you@example.com · Ultra".
+    public var title: String { plan.map { "\(email) · \($0)" } ?? email }
 }
 
 /// One fetch of every provider. Claude has one row per Claude Code config profile.
-public struct UsageSnapshot: Equatable, Sendable {
+public struct UsageSnapshot: Equatable, Sendable, Codable {
     public var codex: RowUsage
     public var claude: [ClaudeAccount]
-    public var kimi: RowUsage
 
-    public init(codex: RowUsage = RowUsage(), claude: [ClaudeAccount] = [], kimi: RowUsage = RowUsage()) {
+    public init(codex: RowUsage = RowUsage(), claude: [ClaudeAccount] = []) {
         self.codex = codex
         self.claude = claude
-        self.kimi = kimi
     }
 
     /// Claude usages with credentials (hidden profiles excluded).
     public var claudeUsages: [RowUsage] { claude.map(\.usage).filter(\.isConfigured) }
-
-    /// Claude's usage API can keep reporting a 5H window for plans that no longer enforce one, and
-    /// nothing in it identifies the plan, so the user marks those accounts. An account's only window is kept.
-    public func withoutFiveHour(accounts ids: Set<String>) -> UsageSnapshot {
-        var copy = self
-        for index in copy.claude.indices {
-            guard let id = copy.claude[index].id, ids.contains(id) else { continue }
-            let remaining = copy.claude[index].usage.windows.filter { $0.label != "5H" }
-            if !remaining.isEmpty { copy.claude[index].usage.windows = remaining }
-        }
-        return copy
-    }
 }
 
 /// What the menu-bar label shows. Raw values are persisted in UserDefaults; case order is menu order.
@@ -117,7 +119,7 @@ public enum Pool {
 public enum MenuLabel {
     public static func text(mode: DisplayMode, snapshot: UsageSnapshot) -> String {
         let claude = snapshot.claudeUsages
-        let all = ([snapshot.codex, snapshot.kimi] + claude).filter { $0.isConfigured && $0.error == nil }
+        let all = ([snapshot.codex] + claude).filter { $0.isConfigured && $0.error == nil }
         switch mode {
         case .availableNow: return Format.percent(AvailableNow.share(rows: all))
         case .lowest: return Format.percent(all.compactMap { $0.constraining?.percentLeft }.min())
@@ -266,8 +268,16 @@ public enum ResetFormat {
     }
 
     /// "5h resets 3h 48m · wk resets 6d 21h"; a lone window reads "resets 5d 20h". Nil if no reset is known.
+    /// Windows resetting together (a model cap sharing the weekly reset) are listed once.
     public static func line(for windows: [UsageWindow], now: Date = Date()) -> String? {
-        let parts = windows.compactMap { w in countdown(to: w.resetsAt, now: now).map { (w.label.lowercased(), "resets \($0)") } }
+        var seen: [Date] = []
+        let unique = windows.filter { w in
+            guard let at = w.resetsAt else { return true }
+            if seen.contains(where: { abs($0.timeIntervalSince(at)) < 60 }) { return false }
+            seen.append(at)
+            return true
+        }
+        let parts = unique.compactMap { w in countdown(to: w.resetsAt, now: now).map { (w.label.lowercased(), "resets \($0)") } }
         if parts.isEmpty { return nil }
         if parts.count == 1 { return parts[0].1 }
         return parts.map { "\($0.0) \($0.1)" }.joined(separator: " · ")

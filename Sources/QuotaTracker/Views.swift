@@ -12,6 +12,8 @@ struct PopoverModel {
     struct Bars {
         var bars: [Bar] = []
         var reset: String?
+        /// Last good data shown while offline; drawn dimmed.
+        var stale = false
     }
     struct Account {
         var name: String
@@ -193,18 +195,23 @@ final class PopoverView: NSView {
         return y + pad
     }
 
-    /// Bar rows: label (20) · dithered bar · percent (34, right); then the reset line in tertiary.
+    /// Bar rows: label (≥28, widest label in group) · dithered bar · percent (34, right); then the reset line in tertiary.
     private func bars(_ group: PopoverModel.Bars, y start: CGFloat, draw: Bool) -> CGFloat {
         guard !group.bars.isEmpty else { return start }
         let pad = Self.pad, right = Self.width - pad
         var y = start + 6
+        let ctx = draw && group.stale ? NSGraphicsContext.current?.cgContext : nil
+        ctx?.saveGState()
+        ctx?.setAlpha(0.4)
+        defer { ctx?.restoreGState() }
+        let labelWidth = max(28, (group.bars.map { Self.text($0.label, Self.body, Palette.secondaryText).size().width }.max() ?? 0) + 8)
         for (i, bar) in group.bars.enumerated() {
             if i > 0 { y += 5 }
             if draw {
                 Self.text(bar.label, Self.body, Palette.secondaryText).draw(at: NSPoint(x: pad, y: y))
                 let percent = Self.text(bar.percent, Self.body, Palette.primaryText)
                 percent.draw(at: NSPoint(x: right - percent.size().width, y: y))
-                let barRect = NSRect(x: pad + 28, y: y + 3, width: right - 34 - 8 - (pad + 28), height: 8)
+                let barRect = NSRect(x: pad + labelWidth, y: y + 3, width: right - 34 - 8 - (pad + labelWidth), height: 8)
                 Self.dither(barRect, fraction: bar.fraction, low: bar.low)
             }
             y += Self.lineBody

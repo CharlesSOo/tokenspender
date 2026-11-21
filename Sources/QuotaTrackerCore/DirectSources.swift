@@ -1,15 +1,13 @@
 import Foundation
 import CryptoKit
 
-/// Direct usage fetchers for Codex and Kimi that bypass CodexBarCLI.
+/// Direct usage fetcher for Codex that bypasses CodexBarCLI.
 ///
 /// Credentials are never logged:
 /// - Codex: `~/.codex/auth.json` (renewed by CodexOAuth; carries `account_id`). Pi's `openai`
 ///   OAuth token is a ChatGPT-for-API token without `chatgpt_account_id` and is rejected by
 ///   `wham/usage` with 401 `rejected_by_access_enforcement`, so it cannot be used here.
-/// - Kimi: `~/.pi/agent/auth.json` key `kimi-coding` (Pi owns refresh; expired → "expired").
 public enum DirectSources {
-    public static var piAuthPath = NSHomeDirectory() + "/.pi/agent/auth.json"
     public static var codexAuthPath = NSHomeDirectory() + "/.codex/auth.json"
     static let timeout: TimeInterval = 20
     static let session: URLSession = {
@@ -54,45 +52,6 @@ public enum DirectSources {
             case .expired: return "expired"
             }
         }
-    }
-
-    private struct PiAuth: Decodable {
-        struct Entry: Decodable {
-            let type: String
-            let access: String?
-            let expires: Double?
-
-            private enum CodingKeys: String, CodingKey { case type, access, expires }
-            init(from decoder: Decoder) throws {
-                let c = try decoder.container(keyedBy: CodingKeys.self)
-                type = try c.decode(String.self, forKey: .type)
-                guard type == "oauth" else { access = nil; expires = nil; return }
-                access = try c.decode(String.self, forKey: .access)
-                expires = c.contains(.expires) ? try c.decode(Double.self, forKey: .expires) : nil
-            }
-        }
-        let entries: [String: LenientEntry]
-        init(from decoder: Decoder) throws {
-            // Preserve malformed target presence while tolerating unrelated malformed providers.
-            let c = try decoder.singleValueContainer()
-            entries = try c.decode([String: LenientEntry].self)
-        }
-        struct LenientEntry: Decodable {
-            let entry: Entry?
-            init(from decoder: Decoder) throws { entry = try? Entry(from: decoder) }
-        }
-    }
-
-    /// Pi `auth.json`: `{ "<key>": { type: "oauth", access, refresh, expires(ms epoch) } }`.
-    static func piCredential(_ key: String, authJSON: Data, now: Date = Date()) -> Result<Credential, CredentialError> {
-        guard let auth = try? JSONDecoder().decode(PiAuth.self, from: authJSON) else { return .failure(.unreadable) }
-        guard let target = auth.entries[key] else { return .failure(.missing) }
-        guard let e = target.entry else { return .failure(.unreadable) }
-        guard e.type == "oauth" else { return .failure(.missing) }
-        guard let access = e.access, !access.isEmpty else { return .failure(.unreadable) }
-        let expires = e.expires.map { Date(timeIntervalSince1970: $0 / 1000) }
-        if let expires, expires <= now { return .failure(.expired) }
-        return .success(Credential(access: access, expires: expires))
     }
 
     private struct CodexAuth: Decodable {
@@ -176,7 +135,7 @@ public enum DirectSources {
                 (data, status) = try await transport(codexRequest(cred))
             }
             guard status != 401 else { throw CodexOAuth.Failure.loginRequired }
-            guard status == 200 else { return .failure(Parse.quiet("HTTP \(status)")) }
+            guard status == 200 else { return httpFailure(status) }
             var row = parseCodex(data)
             guard row.isConfigured else { return row }
             row.observedAt = Date()
@@ -187,7 +146,7 @@ public enum DirectSources {
         } catch let error as CodexOAuth.Failure {
             return .failure(error.rawValue)
         } catch {
-            return .failure(Parse.quiet((error as? URLError)?.code == .timedOut ? "timed out" : "network error"))
+            return networkFailure(error)
         }
     }
 
@@ -199,45 +158,24 @@ public enum DirectSources {
         return req
     }
 
-    // MARK: - Kimi: GET https://api.kimi.com/coding/v1/usages (ported from CodexBar KimiUsageFetcher.fetchCodeAPIUsage)
-
-    private struct KimiUsage: Decodable {
-        struct Pool: Decodable {
-            let used_ratio: Double?
-            let reset_time: String?
-        }
-        struct Pools: Decodable {
-            let limit_5h: Pool?
-            let limit_7d: Pool?
-        }
-        let usages: Pools?
-    }
-
-    public static func parseKimi(_ data: Data) -> RowUsage {
-        guard let usage = try? JSONDecoder().decode(KimiUsage.self, from: data) else { return .failure("Unreadable usage response") }
-        let windows = [("5H", usage.usages?.limit_5h), ("WK", usage.usages?.limit_7d)].compactMap { label, p -> UsageWindow? in
-            guard let p, let ratio = p.used_ratio, ratio.isFinite, ratio >= 0 else { return nil }
-            return UsageWindow(label: label, percentLeft: Parse.left(min(1, ratio) * 100), resetsAt: p.reset_time.flatMap(Parse.date))
-        }
-        return windows.isEmpty ? .failure("No usage windows") : RowUsage(windows: windows)
-    }
-
-    public static func kimi() async -> RowUsage {
-        let cred: Credential
-        switch readFile(piAuthPath).flatMap({ piCredential("kimi-coding", authJSON: $0) }) {
-        case .failure(let e): return .failure(e.message)
-        case .success(let c): cred = c
-        }
-        var req = URLRequest(url: URL(string: "https://api.kimi.com/coding/v1/usages")!, timeoutInterval: timeout)
-        req.setValue("Bearer \(cred.access)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        var row = await fetch(req, parse: parseKimi)
-        row.observedAt = Date()
-        row.identity = SHA256.hash(data: Data(cred.access.utf8)).description
-        return row
-    }
-
     // MARK: - helpers
+
+    /// No connectivity, DNS/connection trouble and timeouts are transient; anything else is not.
+    public static func isTransient(_ error: Error) -> Bool {
+        guard let code = (error as? URLError)?.code else { return false }
+        return [.notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .cannotConnectToHost,
+                .dnsLookupFailed, .internationalRoamingOff, .dataNotAllowed, .callIsActive,
+                .secureConnectionFailed, .badServerResponse].contains(code)
+    }
+
+    static func networkFailure(_ error: Error) -> RowUsage {
+        .failure(Parse.quiet((error as? URLError)?.code == .timedOut ? "timed out" : "network error"), transient: isTransient(error))
+    }
+
+    /// 5xx and 429 are transient; 401/403 and other statuses are not.
+    static func httpFailure(_ status: Int) -> RowUsage {
+        .failure(Parse.quiet("HTTP \(status)"), transient: status == 429 || (500...599).contains(status))
+    }
 
     static func readFile(_ path: String) -> Result<Data, CredentialError> {
         do { return .success(try Data(contentsOf: URL(fileURLWithPath: path))) }
@@ -245,18 +183,5 @@ public enum DirectSources {
             if error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return .failure(.missing) }
             return .failure(.unreadable)
         }
-    }
-
-    private static func fetch(_ req: URLRequest, parse: (Data) -> RowUsage) async -> RowUsage {
-        let data: Data, status: Int
-        do {
-            let (d, r) = try await session.data(for: req)
-            data = d
-            status = (r as? HTTPURLResponse)?.statusCode ?? 0
-        } catch {
-            return .failure(Parse.quiet((error as? URLError)?.code == .timedOut ? "timed out" : "network error"))
-        }
-        guard status == 200 else { return .failure(Parse.quiet("HTTP \(status)")) }
-        return parse(data)
     }
 }

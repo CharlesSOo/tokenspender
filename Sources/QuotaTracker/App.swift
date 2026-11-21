@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import Network
 import ServiceManagement
 import QuotaTrackerCore
 
@@ -195,15 +196,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        let accounts = store.snapshot.claude.filter { $0.id != nil && $0.usage.isConfigured }
-        for account in accounts {
-            let item = NSMenuItem(title: "No 5-hour limit: \(account.email)", action: #selector(toggleNoFiveHour(_:)), keyEquivalent: "")
+        let add = NSMenuItem(title: "Add Claude folder…", action: #selector(addClaudeFolder), keyEquivalent: "")
+        add.target = self
+        menu.addItem(add)
+        for folder in store.claudeFolders {
+            let item = NSMenuItem(title: "Remove \((folder as NSString).abbreviatingWithTildeInPath)", action: #selector(removeClaudeFolder(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = account.id
-            item.state = store.noFiveHourAccounts.contains(account.id ?? "") ? .on : .off
+            item.representedObject = folder
             menu.addItem(item)
         }
-        if !accounts.isEmpty { menu.addItem(.separator()) }
+        menu.addItem(.separator())
         let animation = NSMenu(title: "Animation")
         for option in CritterAnimation.allCases {
             let item = NSMenuItem(title: option.title, action: #selector(pickAnimation(_:)), keyEquivalent: "")
@@ -227,9 +229,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store.selection = selection
     }
 
-    @objc private func toggleNoFiveHour(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        store.toggleNoFiveHour(account: id)
+    @objc private func addClaudeFolder() {
+        let open = NSOpenPanel()
+        open.canChooseDirectories = true
+        open.canChooseFiles = false
+        open.allowsMultipleSelection = false
+        open.showsHiddenFiles = true
+        open.message = "Choose a Claude Code config folder (CLAUDE_CONFIG_DIR)"
+        NSApp.activate(ignoringOtherApps: true)
+        guard open.runModal() == .OK, let url = open.url else { return }
+        store.addClaudeFolder(url.standardizedFileURL.path)
+    }
+
+    @objc private func removeClaudeFolder(_ sender: NSMenuItem) {
+        guard let folder = sender.representedObject as? String else { return }
+        store.removeClaudeFolder(folder)
     }
 
     @objc private func pickAnimation(_ sender: NSMenuItem) {
@@ -245,7 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         m.subtitle = "AVAILABLE NOW (EST.)  " + Format.percent(AvailableNow.share(rows: store.rows.map(\.usage)))
         let claudeIndices = store.rows.indices.filter { store.rows[$0].provider == "CLAUDE" && store.rows[$0].usage.isConfigured }
         var sections: [PopoverModel.Section] = []
-        for provider in ["CODEX", "CLAUDE", "KIMI"] {
+        for provider in ["CODEX", "CLAUDE"] {
             if provider == "CLAUDE" {
                 guard !claudeIndices.isEmpty else { continue }
                 sections.append(PopoverModel.Section(
@@ -254,7 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     accounts: claudeIndices.map { i in
                         let usage = store.rows[i].usage
                         return PopoverModel.Account(name: store.rows[i].title,
-                            note: usage.error == nil ? burnLabel(row: i, now: now) : nil,
+                            note: usage.error != nil ? nil : usage.hint ?? burnLabel(row: i, now: now),
                             tag: tag(usage), bars: bars(usage, now: now))
                     }
                 ))
@@ -264,8 +278,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         m.sections = sections
         m.refreshing = store.isRefreshing
+        let staleAt = store.rows.filter { $0.usage.isConfigured && $0.usage.isStale }.compactMap(\.usage.observedAt).min()
         if store.isRefreshing {
             m.footer = "UPDATING…"
+        } else if let staleAt {
+            let minutes = max(0, Int(now.timeIntervalSince(staleAt) / 60))
+            let ago = minutes < 1 ? "JUST NOW" : minutes < 60 ? "\(minutes)M AGO" : minutes < 1440 ? "\(minutes / 60)H AGO" : "\(minutes / 1440)D AGO"
+            m.footer = "OFFLINE · UPDATED \(ago)"
         } else if let updatedAt = store.updatedAt {
             let minutes = Int(now.timeIntervalSince(updatedAt) / 60)
             m.footer = minutes < 1 ? "UPDATED JUST NOW" : "UPDATED \(minutes)M AGO"
@@ -300,7 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 percent: String(format: "%02d%%", Int(w.percentLeft.rounded()))
             )
         }
-        return PopoverModel.Bars(bars: bars, reset: ResetFormat.line(for: usage.windows, now: now))
+        return PopoverModel.Bars(bars: bars, reset: ResetFormat.line(for: usage.windows, now: now), stale: usage.isStale)
     }
 
     private func burnLabel(row: Int, now: Date) -> String? {
@@ -375,19 +394,26 @@ struct Row {
 @MainActor
 final class Store {
     static let demo = ProcessInfo.processInfo.environment["QUOTATRACKER_DEMO"] != nil
-    private var fetched = UsageSnapshot(codex: RowUsage(), kimi: .notConfigured)
-    var snapshot: UsageSnapshot { fetched.withoutFiveHour(accounts: noFiveHourAccounts) }
-    /// Claude account ids the user marked as having no 5-hour limit.
-    private(set) var noFiveHourAccounts = Set(UserDefaults.standard.stringArray(forKey: "noFiveHourAccounts") ?? [])
-    func toggleNoFiveHour(account id: String) {
-        if noFiveHourAccounts.remove(id) == nil { noFiveHourAccounts.insert(id) }
-        UserDefaults.standard.set(noFiveHourAccounts.sorted(), forKey: "noFiveHourAccounts")
+    private var fetched = UsageSnapshot(codex: RowUsage())
+    var snapshot: UsageSnapshot { LastGood.resettingPast(fetched, now: Date()) }
+    /// Claude config folders the user added, on top of the auto-detected ones.
+    private(set) var claudeFolders = UserDefaults.standard.stringArray(forKey: "claudeFolders") ?? []
+    func addClaudeFolder(_ path: String) {
+        guard !claudeFolders.contains(path) else { return }
+        claudeFolders.append(path)
+        UserDefaults.standard.set(claudeFolders, forKey: "claudeFolders")
+        refresh()
+    }
+    func removeClaudeFolder(_ path: String) {
+        claudeFolders.removeAll { $0 == path }
+        UserDefaults.standard.set(claudeFolders, forKey: "claudeFolders")
+        fetched.claude.removeAll { $0.profile == (path as NSString).abbreviatingWithTildeInPath }
         onChange?()
+        refresh()
     }
     var rows: [Row] {
         [Row(id: "codex/" + (snapshot.codex.identity ?? "unknown"), provider: "CODEX", title: "Codex", usage: snapshot.codex)] +
-        snapshot.claude.map { Row(id: $0.id ?? "claude/unverified/\($0.profile)", provider: "CLAUDE", title: $0.email, usage: $0.usage) } +
-        [Row(id: "kimi/" + (snapshot.kimi.identity ?? "unknown"), provider: "KIMI", title: "Kimi", usage: snapshot.kimi)]
+        snapshot.claude.map { Row(id: $0.id ?? "claude/unverified/\($0.profile)", provider: "CLAUDE", title: $0.title, usage: $0.usage) }
     }
     private(set) var updatedAt: Date?
     private(set) var isRefreshing = false
@@ -404,6 +430,8 @@ final class Store {
     var onChange: (() -> Void)?
     private var history = SampleHistory()
     private var timer: Timer?
+    private let pathMonitor = NWPathMonitor()
+    private var reconnect: Task<Void, Never>?
 
     private func key(row: Row, index: Int) -> String {
         let w = row.usage.windows[index]
@@ -413,6 +441,26 @@ final class Store {
 
     func start() {
         if Self.demo { return loadDemo() }
+        if let saved = LastGood.load() {
+            fetched = saved
+            onChange?()
+        }
+        var wasSatisfied = true
+        pathMonitor.pathUpdateHandler = { path in
+            let satisfied = path.status == .satisfied
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { wasSatisfied = satisfied }
+                guard satisfied, !wasSatisfied else { return }
+                reconnect?.cancel()
+                reconnect = Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled else { return }
+                    self?.refresh()
+                }
+            }
+        }
+        pathMonitor.start(queue: .main)
         let timer = Timer(timeInterval: 300, repeats: true) { _ in
             Task { @MainActor [weak self] in self?.refresh() }
         }
@@ -427,13 +475,16 @@ final class Store {
         isRefreshing = true
         onChange?()
         Task {
-            fetched = await Fetcher.fetchAll()
+            fetched = LastGood.merge(fresh: await Fetcher.fetchAll(claudeFolders: claudeFolders), previous: fetched)
+            try? LastGood.save(fetched)
             let now = Date()
             var keys: Set<String> = []
             for row in rows where row.usage.error == nil && !row.id.hasPrefix("claude/unverified/") {
                 for (index, window) in row.usage.windows.enumerated() {
                     let k = key(row: row, index: index)
                     keys.insert(k)
+                    // Cached rows are not new observations.
+                    guard !row.usage.isStale else { continue }
                     // Without a source timestamp the data may be cached: no invented fresh observations.
                     guard let at = row.usage.observedAt, at <= now else { continue }
                     history.append(k, UsageSample(at: at, percentLeft: window.percentLeft))
@@ -456,7 +507,7 @@ final class Store {
             claude: [
                 ClaudeAccount(profile: "~/.claude", email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/"),
                 ClaudeAccount(profile: "~/.claude-work", email: "work@example.com", usage: RowUsage(windows: [window("WK", 61, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/")
-            ], kimi: .notConfigured)
+            ])
         for (minutesAgo, left) in [(30.0, 61.09), (15.0, 51.545), (0.0, 42.0)] {
             history.append(key(row: rows[1], index: 0), UsageSample(at: now.addingTimeInterval(-minutesAgo * 60), percentLeft: left))
         }

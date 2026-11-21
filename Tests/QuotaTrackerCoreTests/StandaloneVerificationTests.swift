@@ -77,7 +77,7 @@ final class StandaloneVerificationTests: XCTestCase {
 
     func testNativePinUnavailableAfterLogoutNeverFollowsDifferentLoginAndRecovers() async throws {
         func snapshot(_ accounts: [ClaudeAccount]) -> UsageSnapshot {
-            UsageSnapshot(codex: .notConfigured, claude: accounts, kimi: .notConfigured)
+            UsageSnapshot(codex: .notConfigured, claude: accounts)
         }
         let usage = try NativeClaude.usage(data(#"{"five_hour":{"utilization":10},"seven_day":{"utilization":65}}"#))
         let first = try NativeClaude.account(profile: profile(), usage: usage)
