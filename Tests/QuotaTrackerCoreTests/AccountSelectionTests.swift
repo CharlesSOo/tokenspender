@@ -31,8 +31,8 @@ final class AccountSelectionTests: XCTestCase {
         XCTAssertEqual(b.text(snapshot: snapshot(accounts)), "70%")
         XCTAssertEqual(DisplaySelection.mode(.claudePool).text(snapshot: snapshot(accounts)), "45%")
         let choices = DisplaySelection.choices(snapshot: snapshot(accounts), selected: a)
-        XCTAssertEqual(choices.count, 6)
-        XCTAssertEqual(Array(choices.prefix(4)).map(\.title), DisplayMode.allCases.map(\.title))
+        XCTAssertEqual(choices.count, 4)
+        XCTAssertEqual(Array(choices.prefix(2)).map(\.title), DisplayMode.allCases.map(\.title))
         XCTAssertEqual(choices.suffix(2).map(\.selection), [a, b])
         XCTAssertEqual(accounts.count, 2) // Selection never filters the popover snapshot.
     }
@@ -41,7 +41,7 @@ final class AccountSelectionTests: XCTestCase {
         let accounts = [pair()[0]]
         let selected = DisplaySelection.claudeAccount(try XCTUnwrap(accounts[0].id))
         let choices = DisplaySelection.choices(snapshot: snapshot(accounts), selected: selected)
-        XCTAssertEqual(choices.count, 5)
+        XCTAssertEqual(choices.count, 3)
         XCTAssertEqual(choices.last?.title, "Claude: a@example.com — pinned")
         XCTAssertEqual(selected.text(snapshot: snapshot(accounts)), "20%")
         XCTAssertEqual(DisplaySelection.mode(.claudePool).text(snapshot: snapshot(accounts)), "20%")
@@ -79,7 +79,7 @@ final class AccountSelectionTests: XCTestCase {
         account.usage = .notConfigured
         XCTAssertEqual(selected.text(snapshot: snapshot([account])), "—")
         XCTAssertFalse(DisplaySelection.choices(snapshot: snapshot([account]), selected: selected).last!.enabled)
-        XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot([]), selected: .mode(.availableNow)).count, 4)
+        XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot([]), selected: .mode(.claudePool)).count, 2)
         for mode in DisplayMode.allCases {
             XCTAssertEqual(DisplaySelection.mode(mode).text(snapshot: snapshot([])), "—")
             XCTAssertEqual(DisplaySelection(rawValue: DisplaySelection.mode(mode).rawValue), .mode(mode))
@@ -90,7 +90,7 @@ final class AccountSelectionTests: XCTestCase {
     func testUnverifiedRowsArePooledButNotPinnableAndSameEmailShowsProfile() {
         let failed = ClaudeAccount(profile: "~/.claude", email: "~/.claude", usage: .failure("expired"))
         let unverified = ClaudeAccount(profile: "~/.claude-x", email: "x@example.com", usage: RowUsage(windows: [UsageWindow(label: "WK", percentLeft: 20, resetsAt: nil)]))
-        XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot([failed, unverified]), selected: .mode(.claudePool)).count, 4)
+        XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot([failed, unverified]), selected: .mode(.claudePool)).count, 2)
         XCTAssertEqual(DisplaySelection.mode(.claudePool).text(snapshot: snapshot([failed, unverified])), "20%")
         let twins = [account("~/.claude", "a@example.com", first, 80), account("~/.claude-me", "a@example.com", second, 30)]
         XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot(twins), selected: .mode(.claudePool)).suffix(2).map(\.title),

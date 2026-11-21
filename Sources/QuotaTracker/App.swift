@@ -256,35 +256,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func model(now: Date) -> PopoverModel {
         var m = PopoverModel()
-        m.subtitle = "AVAILABLE NOW (EST.)  " + Format.percent(AvailableNow.share(rows: store.rows.map(\.usage)))
         let claudeIndices = store.rows.indices.filter { store.rows[$0].provider == "CLAUDE" && store.rows[$0].usage.isConfigured }
         var sections: [PopoverModel.Section] = []
-        for provider in ["CODEX", "CLAUDE"] {
-            if provider == "CLAUDE" {
-                guard !claudeIndices.isEmpty else { continue }
-                sections.append(PopoverModel.Section(
-                    label: "CLAUDE",
-                    subtitle: Pool.summary(accounts: claudeIndices.map { store.rows[$0].usage }).map { ("EST. POOL", $0) },
-                    accounts: claudeIndices.map { i in
-                        let usage = store.rows[i].usage
-                        return PopoverModel.Account(name: store.rows[i].title,
-                            note: usage.error != nil ? nil : usage.hint ?? burnLabel(row: i, now: now),
-                            tag: tag(usage), bars: bars(usage, now: now))
-                    }
-                ))
-            } else if let i = store.rows.firstIndex(where: { $0.provider == provider && $0.usage.isConfigured }) {
-                sections.append(section(provider, row: i, now: now))
-            }
+        // The Claude pool leads; per-account rows below it are the breakdown. Codex is never pooled.
+        if !claudeIndices.isEmpty {
+            let pool = ClaudePool(accounts: store.snapshot.claude)
+            sections.append(PopoverModel.Section(
+                label: pool.title,
+                tag: pool.isEstimated ? "est." : nil,
+                bars: PopoverModel.Bars(bars: pool.lines.map { bar(label: $0.label, percentLeft: $0.percentLeft) }),
+                accounts: claudeIndices.map { i in
+                    let usage = store.rows[i].usage
+                    return PopoverModel.Account(name: store.rows[i].title,
+                        note: usage.error != nil ? nil : usage.hint ?? burnLabel(row: i, now: now),
+                        tag: tag(usage), bars: bars(usage, now: now))
+                }
+            ))
+        }
+        if let i = store.rows.firstIndex(where: { $0.provider == "CODEX" && $0.usage.isConfigured }) {
+            sections.append(section("CODEX", row: i, now: now))
         }
         m.sections = sections
         m.refreshing = store.isRefreshing
-        let staleAt = store.rows.filter { $0.usage.isConfigured && $0.usage.isStale }.compactMap(\.usage.observedAt).min()
         if store.isRefreshing {
             m.footer = "UPDATING…"
-        } else if let staleAt {
-            let minutes = max(0, Int(now.timeIntervalSince(staleAt) / 60))
-            let ago = minutes < 1 ? "JUST NOW" : minutes < 60 ? "\(minutes)M AGO" : minutes < 1440 ? "\(minutes / 60)H AGO" : "\(minutes / 1440)D AGO"
-            m.footer = "OFFLINE · UPDATED \(ago)"
+        } else if let stale = Footer.stale(store.rows.map(\.usage), now: now) {
+            m.footer = stale
         } else if let updatedAt = store.updatedAt {
             let minutes = Int(now.timeIntervalSince(updatedAt) / 60)
             m.footer = minutes < 1 ? "UPDATED JUST NOW" : "UPDATED \(minutes)M AGO"
@@ -311,15 +308,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func bars(_ usage: RowUsage, now: Date) -> PopoverModel.Bars {
         guard usage.error == nil else { return PopoverModel.Bars() }
-        let bars = usage.windows.map { w in
-            PopoverModel.Bar(
-                label: w.label,
-                fraction: w.percentLeft / 100,
-                low: w.percentLeft < 20,
-                percent: String(format: "%02d%%", Int(w.percentLeft.rounded()))
-            )
-        }
+        let bars = usage.windows.map { bar(label: $0.label, percentLeft: $0.percentLeft) }
         return PopoverModel.Bars(bars: bars, reset: ResetFormat.line(for: usage.windows, now: now), stale: usage.isStale)
+    }
+
+    private func bar(label: String, percentLeft: Double) -> PopoverModel.Bar {
+        PopoverModel.Bar(label: label, fraction: percentLeft / 100, low: percentLeft < 20,
+                         percent: String(format: "%02d%%", Int(percentLeft.rounded())))
     }
 
     private func burnLabel(row: Int, now: Date) -> String? {
@@ -417,8 +412,8 @@ final class Store {
     }
     private(set) var updatedAt: Date?
     private(set) var isRefreshing = false
-    var selection = demo ? DisplaySelection.mode(.availableNow) :
-        UserDefaults.standard.string(forKey: "displaySelection").flatMap(DisplaySelection.init(rawValue:)) ?? .mode(.availableNow) {
+    var selection = demo ? DisplaySelection.mode(.claudePool) :
+        UserDefaults.standard.string(forKey: "displaySelection").flatMap(DisplaySelection.init(rawValue:)) ?? .mode(.claudePool) {
         didSet {
             if !Self.demo { UserDefaults.standard.set(selection.rawValue, forKey: "displaySelection") }
             onChange?()
@@ -505,8 +500,8 @@ final class Store {
         fetched = UsageSnapshot(
             codex: RowUsage(windows: [window("WK", 73, 5 * 1440 + 20 * 60)]),
             claude: [
-                ClaudeAccount(profile: "~/.claude", email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/"),
-                ClaudeAccount(profile: "~/.claude-work", email: "work@example.com", usage: RowUsage(windows: [window("WK", 61, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/")
+                ClaudeAccount(profile: "~/.claude", email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/", plan: "Max"),
+                ClaudeAccount(profile: "~/.claude-work", email: "work@example.com", usage: RowUsage(windows: [window("WK", 61, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/", plan: "Ultra")
             ])
         for (minutesAgo, left) in [(30.0, 61.09), (15.0, 51.545), (0.0, 42.0)] {
             history.append(key(row: rows[1], index: 0), UsageSample(at: now.addingTimeInterval(-minutesAgo * 60), percentLeft: left))

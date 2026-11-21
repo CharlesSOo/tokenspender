@@ -13,14 +13,12 @@ final class ParseTests: XCTestCase {
             RowUsage(windows: [UsageWindow(label: "5H", percentLeft: five, resetsAt: nil), UsageWindow(label: "WK", percentLeft: week, resetsAt: nil)])
         }
         let snapshot = UsageSnapshot(codex: row(80, 40), claude: [ClaudeAccount(profile: "~/.claude", email: "a@example.com", usage: row(100, 0)), ClaudeAccount(profile: "~/.claude-b", email: "b@example.com", usage: row(60, 80))])
-        XCTAssertEqual(MenuLabel.text(mode: .availableNow, snapshot: snapshot), "33%")
-        XCTAssertEqual(MenuLabel.text(mode: .lowest, snapshot: snapshot), "0%")
         XCTAssertEqual(MenuLabel.text(mode: .claudePool, snapshot: snapshot), "30%")
         XCTAssertEqual(MenuLabel.text(mode: .codexPool, snapshot: snapshot), "40%")
-        XCTAssertNil(AvailableNow.share(rows: [.notConfigured, .failure("expired")]))
-        XCTAssertNil(Pool.share(label: "WK", accounts: []))
-        XCTAssertEqual(DisplayMode.allCases.map(\.title), ["Available now", "Lowest account", "Claude pool", "Codex pool"])
-        XCTAssertEqual(Pool.summary(accounts: [row(80, 40)]), "5H 80% · WK 40%")
+        XCTAssertEqual(MenuLabel.text(mode: .codexPool, snapshot: UsageSnapshot(codex: .failure("expired"))), "—")
+        XCTAssertNil(ClaudePool(accounts: []).now)
+        XCTAssertEqual(DisplayMode.allCases.map(\.title), ["Claude pool", "Codex"])
+        XCTAssertNil(DisplaySelection(rawValue: "mode/5")) // retired modes fall back to the default
     }
 
     func testBurnRateRequiresDistinctFreshDeclinesAndFutureResetIsNotCutoff() {

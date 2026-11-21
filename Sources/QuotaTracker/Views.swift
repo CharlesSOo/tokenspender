@@ -27,13 +27,9 @@ struct PopoverModel {
         var label: String
         var tag: String?
         var note: String?
-        /// Tertiary line under the header: left label with tracking, right-aligned value ("CLAUDE POOL" / "5H 71% · WK 56%").
-        var subtitle: (String, String)?
         var bars = Bars()
         var accounts: [Account] = []
     }
-    /// Tertiary line under the title ("AVAILABLE NOW  70%").
-    var subtitle = ""
     var sections: [Section] = []
     var footer = ""
     var refreshing = false
@@ -81,7 +77,7 @@ final class PopoverView: NSView {
         func quota(_ bars: PopoverModel.Bars) -> String {
             (bars.bars.map { "\($0.label): \($0.percent) remaining" } + [bars.reset].compactMap { $0 }).joined(separator: ", ")
         }
-        var labels = ["Usage. " + model.subtitle]
+        var labels = ["Usage"]
         for section in model.sections {
             labels.append([section.label, section.tag, section.note, quota(section.bars)].compactMap { $0 }.joined(separator: ". "))
             for account in section.accounts {
@@ -149,22 +145,14 @@ final class PopoverView: NSView {
         let pad = Self.pad, right = Self.width - pad
         var y = pad
 
-        // Title and the "AVAILABLE NOW" line.
         if draw { Self.text("Usage", Self.title, Palette.primaryText).draw(at: NSPoint(x: pad, y: y)) }
-        y += 18 + 6
-        if draw { Self.tag(model.subtitle).draw(at: NSPoint(x: pad, y: y)) }
-        y += Self.lineSmall
+        y += 18
 
         for section in model.sections {
             y += 18
             let rightText = section.tag.map(Self.tag) ?? section.note.map { Self.text($0, Self.small, Palette.tertiaryText) }
             row(y: y, draw: draw, left: Self.text(section.label, Self.label, Palette.secondaryText, tracking: 1.2), right: rightText)
             y += Self.lineSmall
-            if let (label, value) = section.subtitle {
-                y += 10
-                row(y: y, draw: draw, left: Self.tag(label), right: Self.text(value, Self.small, Palette.tertiaryText))
-                y += Self.lineSmall
-            }
             y = bars(section.bars, y: y, draw: draw)
             for (index, account) in section.accounts.enumerated() {
                 y += 10

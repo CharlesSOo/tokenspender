@@ -29,7 +29,7 @@ final class NativeClaudeTests: XCTestCase {
         XCTAssertNotNil(accounts[0].usage.windows[0].resetsAt)
         let snapshot = UsageSnapshot(codex: .notConfigured, claude: accounts)
         XCTAssertEqual(DisplaySelection.claudeAccount(id).text(snapshot: snapshot), "0%")
-        XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot, selected: .mode(.claudePool)).count, 5)
+        XCTAssertEqual(DisplaySelection.choices(snapshot: snapshot, selected: .mode(.claudePool)).count, 3)
     }
 
     func testProfileDiscoveryDefaultFirstDedupedSorted() {

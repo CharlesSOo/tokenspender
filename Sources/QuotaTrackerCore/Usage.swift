@@ -77,55 +77,104 @@ public struct UsageSnapshot: Equatable, Sendable, Codable {
         self.codex = codex
         self.claude = claude
     }
-
-    /// Claude usages with credentials (hidden profiles excluded).
-    public var claudeUsages: [RowUsage] { claude.map(\.usage).filter(\.isConfigured) }
 }
 
 /// What the menu-bar label shows. Raw values are persisted in UserDefaults; case order is menu order.
+/// Retired modes (0 lowest, 5 available now) fall back to the Claude pool.
 public enum DisplayMode: Int, CaseIterable, Sendable {
-    case availableNow = 5, lowest = 0, claudePool = 1, codexPool = 6
+    case claudePool = 1, codexPool = 6
 
     public var title: String {
         switch self {
-        case .availableNow: "Available now"
-        case .lowest: "Lowest account"
         case .claudePool: "Claude pool"
-        case .codexPool: "Codex pool"
+        case .codexPool: "Codex"
         }
     }
-
 }
 
-/// Estimated equal-account mean of limiting quota percentages, NOT remaining token capacity.
-public enum AvailableNow {
-    public static func share(rows: [RowUsage]) -> Double? { Pool.share(label: nil, accounts: rows) }
+/// Weekly capacity of a Claude plan relative to Pro, keyed by the profile's `plan_display_name`.
+/// shortcut: hand-kept table (Pro 1, Max 5, Ultra 10) from Anthropic's published plan multiples; update it
+/// when Anthropic adds, renames or re-sizes a plan. Unknown plans weigh 1 and mark the pool estimated.
+public enum PlanWeight {
+    static let table: [String: Int] = ["pro": 1, "max": 5, "ultra": 10]
+
+    /// Nil when the plan is absent or not in the table.
+    public static func of(_ plan: String?) -> Int? {
+        plan.flatMap { table[$0.trimmingCharacters(in: .whitespaces).lowercased()] }
+    }
 }
 
-public enum Pool {
-    public static func share(label: String?, accounts: [RowUsage]) -> Double? {
-        let values = accounts.filter { $0.isConfigured && $0.error == nil }.compactMap { account in
-            (label.map { l in account.windows.filter { $0.label == l }.min { $0.percentLeft < $1.percentLeft } } ?? account.constraining)?.percentLeft
-        }.filter(\.isFinite)
-        return values.isEmpty ? nil : values.reduce(0, +) / Double(values.count)
+/// All Claude accounts as one plan-weighted pool. Lines are weighted means of percent left, NOT token
+/// balances. Accounts with no numbers (errors, still loading) are left out; stale last-good rows count.
+public struct ClaudePool: Equatable, Sendable {
+    public struct Line: Equatable, Sendable {
+        public let label: String
+        public let percentLeft: Double
     }
 
-    public static func summary(accounts: [RowUsage]) -> String? {
-        let parts = ["5H", "WK"].compactMap { (label: String) in share(label: label, accounts: accounts).map { "\(label) \(Format.percent($0))" } }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    /// Σ plan weights of pooled accounts, in units of Pro.
+    public let size: Int
+    /// Some pooled account's plan is unknown, so its weight is a guess.
+    public let isEstimated: Bool
+    /// "NOW", "WK", then one line per model-scoped weekly cap (e.g. "FABLE"); lines with no data are omitted.
+    public let lines: [Line]
+
+    /// Per account min(5H, WK) left, a missing 5H window counting as 100% (that plan has no 5-hour limit).
+    public var now: Double? { lines.first { $0.label == "NOW" }?.percentLeft }
+
+    /// "CLAUDE POOL · 20× Pro"; plain "CLAUDE POOL" when empty.
+    public var title: String { size > 0 ? "CLAUDE POOL · \(size)× Pro" : "CLAUDE POOL" }
+
+    public init(accounts: [ClaudeAccount]) {
+        let pooled = accounts.filter { $0.usage.isConfigured && $0.usage.error == nil && !$0.usage.windows.isEmpty }
+        let weights = pooled.map { Double(PlanWeight.of($0.plan) ?? 1) }
+        size = Int(weights.reduce(0, +))
+        isEstimated = pooled.contains { PlanWeight.of($0.plan) == nil }
+
+        func left(_ usage: RowUsage, _ label: String) -> Double? {
+            usage.windows.filter { $0.label == label && $0.percentLeft.isFinite }.map(\.percentLeft).min()
+        }
+        /// Weighted mean over accounts that have a value; accounts without one are excluded.
+        func mean(_ value: (RowUsage) -> Double?) -> Double? {
+            let pairs = zip(weights, pooled).compactMap { weight, account in value(account.usage).map { (weight, $0) } }
+            let total = pairs.reduce(0) { $0 + $1.0 }
+            return total > 0 ? pairs.reduce(0) { $0 + $1.0 * $1.1 } / total : nil
+        }
+
+        var labels: [String] = []
+        for window in pooled.flatMap(\.usage.windows) where !["5H", "WK"].contains(window.label) && !labels.contains(window.label) {
+            labels.append(window.label)
+        }
+        let now = mean { usage in
+            let week = left(usage, "WK"), five = left(usage, "5H")
+            if week == nil && five == nil { return nil }
+            return min(five ?? 100, week ?? 100)
+        }
+        let candidates: [(String, Double?)] = [("NOW", now), ("WK", mean { left($0, "WK") })] + labels.map { label in (label, mean { left($0, label) }) }
+        lines = candidates.compactMap { label, value in value.map { Line(label: label, percentLeft: $0) } }
     }
 }
 
 public enum MenuLabel {
     public static func text(mode: DisplayMode, snapshot: UsageSnapshot) -> String {
-        let claude = snapshot.claudeUsages
-        let all = ([snapshot.codex] + claude).filter { $0.isConfigured && $0.error == nil }
         switch mode {
-        case .availableNow: return Format.percent(AvailableNow.share(rows: all))
-        case .lowest: return Format.percent(all.compactMap { $0.constraining?.percentLeft }.min())
-        case .claudePool: return Format.percent(Pool.share(label: nil, accounts: claude))
-        case .codexPool: return Format.percent(Pool.share(label: nil, accounts: [snapshot.codex]))
+        case .claudePool: return Format.percent(ClaudePool(accounts: snapshot.claude).now)
+        case .codexPool:
+            let codex = snapshot.codex
+            return Format.percent(codex.isConfigured && codex.error == nil ? codex.constraining?.percentLeft : nil)
         }
+    }
+}
+
+public enum Footer {
+    /// "OFFLINE · UPDATED 3H AGO" for the oldest stale row, or "LOGIN EXPIRED · …" when that row is stale
+    /// because its Claude login could not be renewed (such rows carry a recovery hint). Nil if nothing is stale.
+    public static func stale(_ rows: [RowUsage], now: Date) -> String? {
+        let stale = rows.filter { $0.isConfigured && $0.isStale }.compactMap { row in row.observedAt.map { (row, $0) } }
+        guard let (row, at) = stale.min(by: { $0.1 < $1.1 }) else { return nil }
+        let minutes = max(0, Int(now.timeIntervalSince(at) / 60))
+        let ago = minutes < 1 ? "JUST NOW" : minutes < 60 ? "\(minutes)M AGO" : minutes < 1440 ? "\(minutes / 60)H AGO" : "\(minutes / 1440)D AGO"
+        return "\(row.hint != nil ? "LOGIN EXPIRED" : "OFFLINE") · UPDATED \(ago)"
     }
 }
 

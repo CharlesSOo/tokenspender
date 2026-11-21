@@ -1,43 +1,60 @@
 # Account selection integration
 
-## Claude Code profiles
+## Claude Code config folders
 
-QuotaTracker shows one Claude row per Claude Code config profile:
+QuotaTracker shows one Claude row per Claude Code config folder:
 
-- the default profile (`CLAUDE_CONFIG_DIR` unset: `~/.claude`, `~/.claude.json`);
+- the default folder (`CLAUDE_CONFIG_DIR` unset: `~/.claude`, `~/.claude.json`);
 - QuotaTracker's own `CLAUDE_SECURESTORAGE_CONFIG_DIR` / `CLAUDE_CONFIG_DIR`, if set;
-- every `~/.claude-*` directory containing a `.claude.json` file (e.g. `~/.claude-me`, used via `CLAUDE_CONFIG_DIR=~/.claude-me`).
+- every `~/.claude-*` directory containing a `.claude.json` file (e.g. `~/.claude-me`, used via `CLAUDE_CONFIG_DIR=~/.claude-me`);
+- every folder added under **Settings → Add Claude folder…** (removable from the same menu; kept in preferences).
 
-Paths are deduped; the default comes first, then the others sorted. A profile with no credentials (no Keychain item and no `.credentials.json`) is skipped. Any other failure shows a row labeled with the profile (e.g. `~/.claude-me`) so you know which login to fix. If two profiles are signed into the same account, one row is shown, preferring a successful fetch. Keychain reads are serialized; network fetches run concurrently.
+Paths are deduped (a trailing slash is dropped from added folders); the default comes first, then the others sorted. A folder with no credentials is skipped. Any other failure shows a row labeled with the folder (e.g. `~/.claude-me`) so you know which login to fix. If two folders are signed into the same account, one row is shown, preferring a successful fetch. Keychain reads are serialized; network fetches run concurrently.
 
-Sign in normally through Claude Code. QuotaTracker reads the exact OAuth credential item for that profile using Apple's Security framework, without writing, exporting, refreshing, changing Keychain ACLs, or starting a new login system. Only `claudeAiOauth.accessToken` and millisecond `expiresAt` are decoded; refresh tokens and unrelated entries are not decoded or used. The credential JSON and access token remain in memory for the fetch, never preferences, caches, logs, or diagnostics.
+### Credentials
 
-### Profile boundary
+Sign in normally through Claude Code. Claude Code stores each folder's login as a generic-password Keychain item, written with `/usr/bin/security`; QuotaTracker reads it with the same tool (`security find-generic-password -w`), which is already on the item's access list, so no Keychain approval dialog appears and nothing changes when the app is rebuilt. QuotaTracker never writes, exports or changes the item or its ACL. Only `claudeAiOauth.accessToken` and millisecond `expiresAt` are decoded; refresh tokens and unrelated fields are ignored. The token stays in memory for the fetch and is never written to preferences, caches, logs or diagnostics. Each read has a 10-second deadline.
 
-The default macOS generic-password service is `Claude Code-credentials`, with the OS username (`USER` when present) as its account. For a nonempty configured profile, the service suffix is `-` plus the first eight hex characters of SHA-256 of the **raw NFC-normalized path string**. Trailing slashes and other textual differences are significant; do not resolve the path before hashing.
+The default service is `Claude Code-credentials`, with the OS username (`USER` when present) as its account. For any other folder the service suffix is `-` plus the first eight hex characters of SHA-256 of the **raw NFC-normalized path string** (textual differences matter; the path is not resolved before hashing). `CLAUDE_SECURESTORAGE_CONFIG_DIR`, when defined, takes precedence over `CLAUDE_CONFIG_DIR`. Relative paths (including literal `~/…`) show **unsupported profile path**. A non-default folder never falls back to the default item.
 
-`CLAUDE_SECURESTORAGE_CONFIG_DIR`, when defined, takes precedence over `CLAUDE_CONFIG_DIR`. An explicitly empty secure-storage variable selects the default store. Otherwise, an empty/unset config variable uses the default. Profiles outside `~/.claude-*` need these set in the environment of **QuotaTracker itself**; shell-only settings are not automatically inherited by a login-item app. Absolute profile paths are supported. Relative paths (including literal `~/…`) show **unsupported profile path** rather than risking another process's working-directory interpretation. A non-default profile never falls back to the default Keychain item.
+Only a genuinely absent Keychain item permits reading `.credentials.json` in the same folder (default `~/.claude/.credentials.json`), bounded to 1 MiB. Other Keychain failures and malformed credentials never fall back to a possibly stale file. API-key and setup-token overrides are not subscription logins and are not used.
 
-Only a genuinely absent Keychain item permits reading `.credentials.json` in the same selected secure-storage directory (default `~/.claude/.credentials.json`). Each profile is read independently. Locked/denied/unavailable Keychain states and malformed/expired present credentials never trigger a fallback to a potentially stale file. File reads are bounded to 1 MiB. Missing OAuth credentials hide Claude; malformed credentials remain visible. API-key, setup-token environment overrides, and third-party OAuth sources are not native subscription-login sources for this integration.
+### Expired logins: delegated renewal
 
-### Consent and expiry
+QuotaTracker never refreshes tokens itself. When a folder's login is past `expiresAt` or the API answers 401, it runs `claude -p /usage --output-format json` with `CLAUDE_CONFIG_DIR` set to that folder (unset for the default folder). That command makes no model call, but Claude Code renews its own login while starting. It runs at most once per folder every 10 minutes, with stdin closed, output discarded and a 20-second deadline; `claude` is looked up in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, then the login shell's `PATH`. The Keychain is then read again.
 
-Background polling, opening the popover, and ordinary Refresh are noninteractive. Each read uses `LAContext.interactionNotAllowed`, plus the legacy login-Keychain process interaction switch (per-query flags alone are insufficient for legacy ACL dialogs). Reads are serialized off the main thread. Denied/locked states show **authorize in Settings**; unavailable Keychain also exposes the retry action.
+If renewal fails, the row keeps its last good numbers, dimmed, with the hint **run claude in ~/.claude-me** (the folder's label), and the footer reads **LOGIN EXPIRED · UPDATED …**. Only network, timeout, 5xx and 429 failures say **OFFLINE · UPDATED …**.
 
-Choose **Settings → Authorize Claude Code access…** to explicitly allow macOS's normal permission/unlock dialog for one read. Deny or cancel is respected; later background polls cannot prompt again. The app does not alter ACLs or choose “Always Allow” for the user. macOS may require approval again after the executable changes. Security.framework's synchronous Keychain operation has no cancellable deadline; an explicit consent dialog can wait for the user's decision, while AppKit stays responsive and overlapping refreshes are suppressed. Network requests have separate deadlines.
+### Verified identity, plan and limits
 
-Expired credentials or HTTP 401 say **expired — log in Claude**. Renew/sign in using Claude Code, then Refresh. QuotaTracker never owns refresh-token rotation.
+Using the same access token, QuotaTracker GETs `https://api.anthropic.com/api/oauth/profile`, requires valid `account.uuid` and `organization.uuid`, then GETs `/api/oauth/usage`. No identity is trusted from `~/.claude.json`, email labels or cached metadata; a missing profile fails closed. The stable pin key is account UUID + organization UUID. The row title adds the plan from `organization.plan_display_name` (e.g. `you@example.com · Ultra`), read every poll.
 
-### Verified identity and quota
+Which limits show comes from the usage response's `limits[]` each poll:
 
-Using the **same access token**, GET `https://api.anthropic.com/api/oauth/profile`, require valid `account.uuid` and `organization.uuid`, then GET `/api/oauth/usage`. No identity is trusted from `~/.claude.json`, email labels, token hashes, or cached account metadata. A missing/unreadable profile fails closed: no quota is attributed to a guessed account. The stable pin key is account UUID + organization UUID.
+| `kind` | Row label |
+|---|---|
+| `session` | `5H` |
+| `weekly_all` | `WK` |
+| `weekly_scoped` | the model's `scope.model.display_name`, uppercased (e.g. `FABLE`) |
 
-Usage maps `five_hour` / `seven_day` utilization and reset timestamps; the menu-bar percentage is the minimum remaining quota across those windows. Headers use OAuth beta `oauth-2025-04-20` and the established `claude-code/2.1.0` compatibility user-agent. Provider bodies are never displayed as errors. HTTP 403/429 and network/timeouts show explicit quiet errors. Requests use an ephemeral, cache/cookie-free URLSession, 20-second request/resource deadlines, and reject redirects. There is no extra credential cache or history scan; two small read-only requests run per normal five-minute native refresh.
+Other kinds and entries without a finite `percent` are ignored; a plan without a 5-hour limit has no `5H` bar. Only when `limits` is absent are the legacy `five_hour` / `seven_day` fields used.
 
-Conventions were checked against installed Claude Code 2.1.294 constants, maintained CodexBar `ClaudeConfigPaths`, `ClaudeOAuthCredentialModels`, `ClaudeOAuthUsageFetcher`, `KeychainSecurity`. Adapted CodexBar code is MIT-licensed; see `THIRD_PARTY_NOTICES.md`. No real credentials, Keychain consent, or provider calls were used during automated validation.
+Headers use OAuth beta `oauth-2025-04-20` and the `claude-code/2.1.0` user-agent. Provider bodies are never displayed as errors. Requests use an ephemeral, cache- and cookie-free URLSession with 20-second deadlines and reject redirects. Two small read-only requests run per folder per five-minute refresh.
 
-## Display semantics and verification
+Adapted CodexBar code is MIT-licensed; see `THIRD_PARTY_NOTICES.md`.
 
-Selection changes only the menu-bar display. Missing pins stay checked as unavailable in Settings, persist through refresh/relaunch, and recover when the same identity returns. All configured bars stay visible. A single Claude account has one pin and one pool choice: equal current percentages but different future-membership semantics. Existing AppKit visuals, accessibility, animations, and original-size critter remain unchanged. These percentages are quota estimates, not comparable token quantities.
+## Claude pool and menu bar
 
-`swift test` covers profile discovery and keychain-service hashing, one row per profile with missing profiles skipped and failures labeled, duplicate-account merging, credential parsing, profile isolation, consent query policy, API failures, verified identity, weekly exhaustion, and prior pool/pin cases using synthetic fixtures. `swift build -c release` checks AppKit integration. Tests do not query the real Keychain or providers. Privacy-safe demo renders use `QUOTATRACKER_DEMO=1` and a private temporary snapshot directory; do not install the test build.
+The Claude section leads with the pool, `CLAUDE POOL · 20× Pro`: each account with numbers (fresh, or last good while stale) is weighted by its plan's weekly capacity (Pro 1, Max 5, Ultra 10). An unknown or missing plan weighs 1 and the pool is tagged **EST.**. Lines are weighted means of percent left:
+
+- **NOW**: per account the lower of 5H and WK left; an account without a 5-hour limit counts 5H as 100%.
+- **WK**: the `weekly_all` limit.
+- One line per model-scoped weekly limit (e.g. **FABLE**); these never lower NOW.
+
+Accounts lacking a window are left out of that line. Rows with no numbers (errors, still loading) are left out entirely. Per-account rows follow as the breakdown; Codex is a separate section and never pooled.
+
+The menu-bar number is the pool's NOW by default. Settings can instead show Codex, or pin one verified Claude account (that account's NOW). Missing pins stay checked as unavailable, persist through refresh and relaunch, and recover when the same identity returns. These percentages are quota estimates, not token balances.
+
+## Verification
+
+`swift test` covers folder discovery and Keychain-service hashing, one row per folder with failures labeled, duplicate-account merging, credential parsing, `limits[]` mapping, delegated renewal and its throttle, last-good merging, pool weighting and lines, footer wording, and pins, all with synthetic fixtures. Tests do not query the real Keychain, run `claude`, or call providers. Privacy-safe demo renders use `QUOTATRACKER_DEMO=1` and a private temporary snapshot directory.

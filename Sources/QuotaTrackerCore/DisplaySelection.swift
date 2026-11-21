@@ -28,7 +28,7 @@ public enum DisplaySelection: Equatable, Sendable, RawRepresentable {
         case .mode(let mode): return MenuLabel.text(mode: mode, snapshot: snapshot)
         case .claudeAccount(let id):
             guard let account = account(id, snapshot: snapshot) else { return "—" }
-            return Format.percent(Pool.share(label: nil, accounts: [account.usage]))
+            return Format.percent(ClaudePool(accounts: [account]).now)
         }
     }
 
@@ -43,10 +43,12 @@ public enum DisplaySelection: Equatable, Sendable, RawRepresentable {
 
     public func tooltip(snapshot: UsageSnapshot) -> String {
         switch self {
-        case .mode:
-            return "\(title(snapshot: snapshot)). Estimated limiting quota percentages, not token capacity. Missing/expired accounts excluded. Animation indicates log activity only."
+        case .mode(.claudePool):
+            return "Claude pool: plan-weighted mean of each account’s lower of 5-hour and weekly quota left. An estimate, not token capacity. Accounts without numbers excluded. Animation indicates log activity only."
+        case .mode(.codexPool):
+            return "Codex: limiting quota left. — means unavailable. Animation indicates log activity only."
         case .claudeAccount:
-            return "\(title(snapshot: snapshot)): \(text(snapshot: snapshot)). Pinned account’s limiting quota, including weekly limits. — means unavailable. Animation indicates log activity only."
+            return "\(title(snapshot: snapshot)): \(text(snapshot: snapshot)). Pinned account’s lower of 5-hour and weekly quota left. — means unavailable. Animation indicates log activity only."
         }
     }
 
