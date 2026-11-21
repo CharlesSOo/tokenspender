@@ -55,6 +55,15 @@ final class PoolTests: XCTestCase {
         XCTAssertEqual(ClaudePool(accounts: [empty, failed]).title, "CLAUDE POOL")
     }
 
+    func testNextResetIsEarliestPooledWindow() {
+        let soon = Date(timeIntervalSince1970: 1000), later = Date(timeIntervalSince1970: 9000)
+        let a = ClaudeAccount(profile: "~/.claude", email: "a", usage: RowUsage(windows: [UsageWindow(label: "WK", percentLeft: 50, resetsAt: later)]), plan: "Max")
+        let b = ClaudeAccount(profile: "~/.claude-b", email: "b", usage: RowUsage(windows: [UsageWindow(label: "5H", percentLeft: 50, resetsAt: soon), UsageWindow(label: "WK", percentLeft: 50, resetsAt: nil)]), plan: "Max")
+        let failed = ClaudeAccount(profile: "~/.claude-x", email: "x", usage: .failure("expired"))
+        XCTAssertEqual(ClaudePool(accounts: [a, b, failed]).nextReset, UsageWindow(label: "5H", percentLeft: 50, resetsAt: soon))
+        XCTAssertNil(ClaudePool(accounts: [failed]).nextReset)
+    }
+
     func testUnknownPlanWeighsOneAndIsEstimated() throws {
         let pool = ClaudePool(accounts: [account(nil, [("5H", 100), ("WK", 100)]), account("Team", [("5H", 0), ("WK", 0)]), account("Pro", [("5H", 40), ("WK", 40)])])
         XCTAssertEqual(pool.size, 3)

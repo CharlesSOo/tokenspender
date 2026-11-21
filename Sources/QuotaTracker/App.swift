@@ -34,7 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let env = ProcessInfo.processInfo.environment
-        if Store.demo, let dir = env["QUOTATRACKER_SNAPSHOT_DIR"] {
+        // Offscreen render of the popover (demo data, or live data without QUOTATRACKER_DEMO), then exit.
+        if let dir = env["QUOTATRACKER_SNAPSHOT_DIR"] {
             store.start()
             Task { await snapshot(to: dir) }
             return
@@ -256,27 +257,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func model(now: Date) -> PopoverModel {
         var m = PopoverModel()
-        let claudeIndices = store.rows.indices.filter { store.rows[$0].provider == "CLAUDE" && store.rows[$0].usage.isConfigured }
-        var sections: [PopoverModel.Section] = []
-        // The Claude pool leads; per-account rows below it are the breakdown. Codex is never pooled.
-        if !claudeIndices.isEmpty {
-            let pool = ClaudePool(accounts: store.snapshot.claude)
-            sections.append(PopoverModel.Section(
-                label: pool.title,
-                tag: pool.isEstimated ? "est." : nil,
-                bars: PopoverModel.Bars(bars: pool.lines.map { bar(label: $0.label, percentLeft: $0.percentLeft) }),
-                accounts: claudeIndices.map { i in
-                    let usage = store.rows[i].usage
-                    return PopoverModel.Account(name: store.rows[i].title,
-                        note: usage.error != nil ? nil : usage.hint ?? burnLabel(row: i, now: now),
-                        tag: tag(usage), bars: bars(usage, now: now))
-                }
-            ))
+        let snapshot = store.snapshot, rows = store.rows
+        // `rows` is Codex then `snapshot.claude` in order, so Claude account k is row k + 1.
+        let claude = snapshot.claude.enumerated().filter { $0.element.usage.isConfigured }
+        // The Claude pool is the parent; account rows below it are its breakdown. Codex is never pooled.
+        if !claude.isEmpty {
+            let pool = ClaudePool(accounts: snapshot.claude)
+            let size = pool.size > 0 ? " · \(pool.size)× Pro" : ""
+            m.pool = PopoverModel.Pool(
+                hero: Format.percent(pool.now),
+                low: (pool.now ?? 100) < 20,
+                caption: "available now" + size + (pool.isEstimated ? " · EST." : ""),
+                bars: pool.lines.filter { $0.label != "NOW" }.map {
+                    PopoverModel.Bar(label: $0.label, fraction: $0.percentLeft / 100, low: $0.percentLeft < 20,
+                                     percent: String(format: "%02d%%", Int($0.percentLeft.rounded())))
+                },
+                reset: pool.nextReset.flatMap { w in ResetFormat.countdown(to: w.resetsAt, now: now).map { "\(w.label.lowercased()) resets \($0)" } }
+            )
+            m.groups.append(PopoverModel.Group(label: "Accounts", rows: claude.map { k, account in
+                child(name: account.title, usage: account.usage, now: ClaudePool(accounts: [account]).now, row: k + 1, at: now)
+            }))
         }
-        if let i = store.rows.firstIndex(where: { $0.provider == "CODEX" && $0.usage.isConfigured }) {
-            sections.append(section("CODEX", row: i, now: now))
+        if let i = rows.firstIndex(where: { $0.provider == "CODEX" && $0.usage.isConfigured }) {
+            let usage = rows[i].usage
+            m.groups.append(PopoverModel.Group(label: "Codex", rows: [
+                child(name: "~/.codex", usage: usage, now: usage.error == nil ? usage.constraining?.percentLeft : nil, row: i, at: now)
+            ]))
         }
-        m.sections = sections
         m.refreshing = store.isRefreshing
         if store.isRefreshing {
             m.footer = "UPDATING…"
@@ -291,30 +298,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return m
     }
 
-    private func section(_ label: String, row: Int, now: Date) -> PopoverModel.Section {
-        let usage = store.rows[row].usage
-        return PopoverModel.Section(
-            label: label,
-            tag: tag(usage),
-            note: usage.error == nil ? burnLabel(row: row, now: now) : nil,
-            bars: bars(usage, now: now)
-        )
-    }
-
-    /// Error (uppercased by the view), or "loading" until the first fetch lands.
-    private func tag(_ usage: RowUsage) -> String? {
-        usage.error ?? (usage.windows.isEmpty ? "loading" : nil)
-    }
-
-    private func bars(_ usage: RowUsage, now: Date) -> PopoverModel.Bars {
-        guard usage.error == nil else { return PopoverModel.Bars() }
-        let bars = usage.windows.map { bar(label: $0.label, percentLeft: $0.percentLeft) }
-        return PopoverModel.Bars(bars: bars, reset: ResetFormat.line(for: usage.windows, now: now), stale: usage.isStale)
-    }
-
-    private func bar(label: String, percentLeft: Double) -> PopoverModel.Bar {
-        PopoverModel.Bar(label: label, fraction: percentLeft / 100, low: percentLeft < 20,
-                         percent: String(format: "%02d%%", Int(percentLeft.rounded())))
+    /// One compact row: NOW on the right, then "5H 42 · WK 95 · resets 3h 48m · 5h burnt in ~1h 10m".
+    private func child(name: String, usage: RowUsage, now value: Double?, row: Int, at now: Date) -> PopoverModel.Child {
+        var child = PopoverModel.Child(name: name)
+        if let error = usage.error { child.tag = error; child.hint = usage.hint; return child }
+        guard let value, !usage.windows.isEmpty else { child.tag = "loading"; return child }
+        child.percent = String(format: "%02d%%", Int(value.rounded()))
+        child.fraction = value / 100
+        child.low = value < 20
+        child.stale = usage.isStale
+        child.hint = usage.hint
+        child.detail = usage.windows.map { "\($0.label) \(Int($0.percentLeft.rounded()))" }
+        let next = usage.windows.compactMap(\.resetsAt).min()
+        if let reset = ResetFormat.countdown(to: next, now: now) { child.detail.append("resets \(reset)") }
+        if let burn = burnLabel(row: row, now: now) { child.detail.append(burn) }
+        return child
     }
 
     private func burnLabel(row: Int, now: Date) -> String? {
@@ -500,9 +498,19 @@ final class Store {
         fetched = UsageSnapshot(
             codex: RowUsage(windows: [window("WK", 73, 5 * 1440 + 20 * 60)]),
             claude: [
-                ClaudeAccount(profile: "~/.claude", email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/", plan: "Max"),
-                ClaudeAccount(profile: "~/.claude-work", email: "work@example.com", usage: RowUsage(windows: [window("WK", 61, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/", plan: "Ultra")
+                ClaudeAccount(profile: "~/.claude", email: "you@example.com", usage: RowUsage(windows: [window("5H", 42, 228), window("WK", 95, 6 * 1440 + 21 * 60), window("FABLE", 97, 6 * 1440 + 21 * 60)]), id: "claude/00000000-0000-0000-0000-000000000001/", plan: "Max"),
+                ClaudeAccount(profile: "~/.claude-work", email: "work@example.com", usage: RowUsage(windows: [window("WK", 61, 2 * 1440 + 3 * 60), window("FABLE", 80, 2 * 1440 + 3 * 60)]), id: "claude/00000000-0000-0000-0000-000000000002/", plan: "Ultra")
             ])
+        // QUOTATRACKER_DEMO=stale: the work login expired and could not be renewed; =single: one account.
+        switch ProcessInfo.processInfo.environment["QUOTATRACKER_DEMO"] {
+        case "stale":
+            fetched.claude[1].usage.isStale = true
+            fetched.claude[1].usage.observedAt = now.addingTimeInterval(-3 * 3600)
+            fetched.claude[1].usage.hint = "run claude in ~/.claude-work"
+        case "single":
+            fetched.claude.removeLast()
+        default: break
+        }
         for (minutesAgo, left) in [(30.0, 61.09), (15.0, 51.545), (0.0, 42.0)] {
             history.append(key(row: rows[1], index: 0), UsageSample(at: now.addingTimeInterval(-minutesAgo * 60), percentLeft: left))
         }

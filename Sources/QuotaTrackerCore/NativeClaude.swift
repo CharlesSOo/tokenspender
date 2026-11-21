@@ -378,12 +378,21 @@ public enum NativeClaude {
     static let refreshTimeout: TimeInterval = 20
 
     /// `claude -p /usage` makes no model call but renews the folder's login the way Claude Code always does.
-    /// The default folder gets no `CLAUDE_CONFIG_DIR`; output is discarded.
+    /// Output is discarded.
     static func runClaude(profile: String) async {
         guard let claude = await claudePath() else { return }
-        var environment = ProcessInfo.processInfo.environment
+        _ = await run(claude, ["-p", "/usage", "--output-format", "json"],
+                      environment: renewalEnvironment(profile: profile, base: ProcessInfo.processInfo.environment),
+                      timeout: refreshTimeout)
+    }
+
+    /// QuotaTracker's environment for `claude`, pointed at exactly one folder: `CLAUDE_CONFIG_DIR` only for a
+    /// non-default folder, and never `CLAUDE_SECURESTORAGE_CONFIG_DIR` (it would override the folder's login).
+    static func renewalEnvironment(profile: String, base: [String: String]) -> [String: String] {
+        var environment = base
+        environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = nil
         environment["CLAUDE_CONFIG_DIR"] = profile.isEmpty ? nil : profile
-        _ = await run(claude, ["-p", "/usage", "--output-format", "json"], environment: environment, timeout: refreshTimeout)
+        return environment
     }
 
     static func claudePath() async -> String? {
@@ -396,40 +405,92 @@ public enum NativeClaude {
         return path.hasPrefix("/") ? path : nil
     }
 
-    /// Runs a process off the main thread with stdin closed; terminated after `timeout`.
-    /// Returns stdout when captured and the process exited 0.
-    private static func run(_ executable: String, _ arguments: [String], environment: [String: String],
-                            timeout: TimeInterval, captureOutput: Bool = false) async -> Data? {
+    /// Runs a process off the main thread in its own process group, stdin and stderr on /dev/null.
+    /// Everything (stdout to EOF, then exit) must finish within `timeout`; otherwise the whole group gets
+    /// SIGTERM, then SIGKILL after `killGrace`, so no descendant outlives the deadline.
+    /// Returns stdout (at most 64 KiB) when captured and the process exited 0; nil otherwise.
+    static func run(_ executable: String, _ arguments: [String], environment: [String: String],
+                    timeout: TimeInterval, captureOutput: Bool = false) async -> Data? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: executable)
-                process.arguments = arguments
-                process.environment = environment
-                process.standardInput = FileHandle.nullDevice
-                process.standardError = FileHandle.nullDevice
-                let stdout = Pipe()
-                process.standardOutput = captureOutput ? stdout : FileHandle.nullDevice
-                let done = DispatchSemaphore(value: 0)
-                process.terminationHandler = { _ in done.signal() }
-                do { try process.run() } catch { return continuation.resume(returning: nil) }
-                var data: Data?
-                let reader = DispatchGroup()
-                if captureOutput {
-                    reader.enter()
-                    DispatchQueue.global(qos: .utility).async {
-                        data = try? stdout.fileHandleForReading.read(upToCount: 65_536)
-                        reader.leave()
-                    }
-                }
-                if done.wait(timeout: .now() + timeout) == .timedOut {
-                    process.terminate()
-                    _ = done.wait(timeout: .now() + 1)
-                    return continuation.resume(returning: nil)
-                }
-                _ = reader.wait(timeout: .now() + 1)
-                continuation.resume(returning: process.terminationStatus == 0 ? data : nil)
+                continuation.resume(returning: spawnAndWait(executable, arguments, environment: environment,
+                                                            timeout: timeout, captureOutput: captureOutput))
             }
         }
+    }
+
+    static let killGrace: TimeInterval = 2
+
+    /// Blocking; one thread owns the pipe, the buffer and the child.
+    private static func spawnAndWait(_ executable: String, _ arguments: [String], environment: [String: String],
+                                     timeout: TimeInterval, captureOutput: Bool) -> Data? {
+        let deadline = Date().addingTimeInterval(timeout)
+        var pipeFDs: [Int32] = [-1, -1]
+        if captureOutput, pipe(&pipeFDs) != 0 { return nil }
+        defer { for fd in pipeFDs where fd >= 0 { close(fd) } }
+
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0)
+        if captureOutput {
+            posix_spawn_file_actions_adddup2(&actions, pipeFDs[1], 1)
+        } else {
+            posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
+        }
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        // Own process group (pgid = child pid) so a timeout can signal every descendant; close inherited fds.
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        posix_spawnattr_setpgroup(&attributes, 0)
+
+        let argv = ([executable] + arguments).map { strdup($0) } + [nil]
+        let envp = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer { for pointer in argv + envp { free(pointer) } }
+        var pid: pid_t = 0
+        guard posix_spawn(&pid, executable, &actions, &attributes, argv, envp) == 0 else { return nil }
+        if captureOutput { close(pipeFDs[1]); pipeFDs[1] = -1 }
+
+        var output = Data()
+        var timedOut = false
+        if captureOutput {
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            reading: while output.count < 65_536 {
+                let remaining = deadline.timeIntervalSinceNow
+                guard remaining > 0 else { timedOut = true; break }
+                var poller = pollfd(fd: pipeFDs[0], events: Int16(POLLIN), revents: 0)
+                let ready = poll(&poller, 1, Int32(min(remaining * 1000, Double(Int32.max)).rounded(.up)))
+                if ready < 0 { if errno == EINTR { continue } else { break } }
+                if ready == 0 { continue } // re-check the deadline
+                let count = read(pipeFDs[0], &buffer, buffer.count)
+                if count < 0 { if errno == EINTR { continue } else { break } }
+                if count == 0 { break reading } // EOF
+                output.append(buffer, count: count)
+            }
+        }
+        var status: Int32 = 0
+        func reaped() -> Bool {
+            let result = waitpid(pid, &status, WNOHANG)
+            if result < 0 && errno != EINTR { status = -1; return true } // lost the child: never "clean"
+            return result == pid
+        }
+        var exited = reaped()
+        while !exited && !timedOut {
+            if Date() >= deadline { timedOut = true; break }
+            usleep(50_000)
+            exited = reaped()
+        }
+        if timedOut {
+            kill(-pid, SIGTERM)
+            let grace = Date().addingTimeInterval(killGrace)
+            while !exited && Date() < grace { usleep(50_000); exited = reaped() }
+            kill(-pid, SIGKILL) // descendants that ignored SIGTERM, even if the leader already exited
+            if !exited { while waitpid(pid, &status, 0) < 0 && errno == EINTR {} }
+            return nil
+        }
+        let exitedCleanly = status & 0x7f == 0 && (status >> 8) & 0xff == 0
+        return exitedCleanly && captureOutput ? output : nil
     }
 }

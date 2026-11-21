@@ -118,6 +118,8 @@ public struct ClaudePool: Equatable, Sendable {
     public let isEstimated: Bool
     /// "NOW", "WK", then one line per model-scoped weekly cap (e.g. "FABLE"); lines with no data are omitted.
     public let lines: [Line]
+    /// The pooled window that resets first (label kept, e.g. "5H"); nil when no reset is known.
+    public let nextReset: UsageWindow?
 
     /// Per account min(5H, WK) left, a missing 5H window counting as 100% (that plan has no 5-hour limit).
     public var now: Double? { lines.first { $0.label == "NOW" }?.percentLeft }
@@ -152,6 +154,7 @@ public struct ClaudePool: Equatable, Sendable {
         }
         let candidates: [(String, Double?)] = [("NOW", now), ("WK", mean { left($0, "WK") })] + labels.map { label in (label, mean { left($0, label) }) }
         lines = candidates.compactMap { label, value in value.map { Line(label: label, percentLeft: $0) } }
+        nextReset = pooled.flatMap(\.usage.windows).filter { $0.resetsAt != nil }.min { $0.resetsAt! < $1.resetsAt! }
     }
 }
 

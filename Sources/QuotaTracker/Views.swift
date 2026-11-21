@@ -8,37 +8,61 @@ struct PopoverModel {
         var low: Bool
         var percent: String
     }
-    /// Bar rows plus the tertiary reset line under them ("5h resets 3h 48m · wk resets 6d 21h").
-    struct Bars {
+    /// The Claude pool: the parent of every account row.
+    struct Pool {
+        /// Pool NOW, e.g. "55%".
+        var hero: String
+        var low = false
+        /// "available now · 20× Pro", "… · EST." when a plan is unknown.
+        var caption: String
+        /// WK, then one bar per model-scoped weekly limit.
         var bars: [Bar] = []
+        /// Earliest pooled reset, e.g. "5h resets 3h 48m".
         var reset: String?
-        /// Last good data shown while offline; drawn dimmed.
+    }
+    /// A compact child row: name and NOW on one line, a thin bar, then one muted detail line.
+    struct Child {
+        var name: String
+        /// "42%"; nil when `tag` is shown instead.
+        var percent: String?
+        var fraction: Double = 0
+        var low = false
+        /// Error or "loading"; drawn uppercased on the right in place of the percent.
+        var tag: String?
+        /// Detail parts ("5H 42", "WK 95", "resets 3h 48m"), joined with " · " and wrapped between parts.
+        var detail: [String] = []
+        /// What to do about a stale row; replaces `detail`.
+        var hint: String?
+        /// Last good data: numbers and bar drawn dimmed.
         var stale = false
     }
-    struct Account {
-        var name: String
-        /// Right-aligned tertiary text on the name row ("5h burnt in ~1h 6m"); hidden when `tag` is set.
-        var note: String?
-        /// Error or "loading"; drawn uppercased on the right.
-        var tag: String?
-        var bars = Bars()
-    }
-    struct Section {
+    struct Group {
         var label: String
-        var tag: String?
-        var note: String?
-        var bars = Bars()
-        var accounts: [Account] = []
+        var rows: [Child]
     }
-    var sections: [Section] = []
+    var pool: Pool?
+    /// "ACCOUNTS", then "CODEX".
+    var groups: [Group] = []
     var footer = ""
     var refreshing = false
 }
 
 /// One flipped NSView that lays out and draws the whole popover in drawRect; no subviews, no layers.
+///
+/// Grid: 4 pt spacing scale, `pad` on all four sides, child rows indented one `indent` step, one
+/// right-aligned number column. Vertical gaps are measured between visible ink (cap top to baseline),
+/// so the rhythm reads evenly regardless of font size.
 final class PopoverView: NSView {
-    static let width: CGFloat = 300
-    private static let pad: CGFloat = 18
+    static let width: CGFloat = 320
+    private static let pad: CGFloat = 20
+    private static let indent: CGFloat = 12
+    /// Spacing scale (4 pt steps), smallest to largest: lines within one row (name → bar → detail, wrapped
+    /// lines); rows (accounts, pool bars); sections (pool, accounts, Codex, footer). Gaps run baseline to cap top.
+    private static let lineGap: CGFloat = 8
+    private static let rowGap: CGFloat = 16
+    private static let sectionGap: CGFloat = 24
+    private static let poolBarHeight: CGFloat = 8
+    private static let childBarHeight: CGFloat = 4
 
     var model = PopoverModel() { didSet { relayout() } }
     var onRefresh: (() -> Void)?
@@ -74,14 +98,16 @@ final class PopoverView: NSView {
     @objc private func quit() { onQuit?() }
 
     override func accessibilityChildren() -> [Any]? {
-        func quota(_ bars: PopoverModel.Bars) -> String {
-            (bars.bars.map { "\($0.label): \($0.percent) remaining" } + [bars.reset].compactMap { $0 }).joined(separator: ", ")
+        var labels: [String] = []
+        if let pool = model.pool {
+            labels.append((["Claude pool: \(pool.hero) \(pool.caption)"] + pool.bars.map { "\($0.label): \($0.percent) remaining" }
+                           + [pool.reset].compactMap { $0 }).joined(separator: ", "))
         }
-        var labels = ["Usage"]
-        for section in model.sections {
-            labels.append([section.label, section.tag, section.note, quota(section.bars)].compactMap { $0 }.joined(separator: ". "))
-            for account in section.accounts {
-                labels.append([account.name, account.tag, account.note, quota(account.bars)].compactMap { $0 }.joined(separator: ". "))
+        for group in model.groups {
+            labels.append(group.label)
+            for row in group.rows {
+                labels.append(([row.name, row.percent.map { "\($0) available now" }, row.tag, row.hint]
+                               + row.detail).compactMap { $0 }.joined(separator: ", "))
             }
         }
         labels.append(model.footer)
@@ -119,118 +145,187 @@ final class PopoverView: NSView {
         _ = layout(draw: true)
     }
 
-    // MARK: Layout + draw in one pass
+    // MARK: Type
 
-    private static func mono(_ size: CGFloat = 11, _ weight: NSFont.Weight = .regular) -> NSFont {
+    private static func mono(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
         .monospacedSystemFont(ofSize: size, weight: weight)
     }
+    /// Four sizes: hero > pool rows > child rows, labels and metadata (metadata told apart by colour).
+    private static let hero = mono(32, .light)
+    private static let poolRow = mono(12)
+    private static let childRow = mono(10)
+    private static let label = mono(10, .medium)
 
     private static func text(_ s: String, _ font: NSFont, _ color: NSColor, tracking: CGFloat = 0) -> NSAttributedString {
         NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: color, .kern: tracking])
     }
+    /// Letter-spaced small caps: section labels in secondary grey, status and tags in tertiary.
+    private static func caps(_ s: String, _ color: NSColor = Palette.tertiaryText) -> NSAttributedString {
+        text(s.uppercased(), label, color, tracking: 1.2)
+    }
+    /// Right column: wide enough for "100%" in the pool-row font, plus a gap before bars end.
+    private static let numberColumn: CGFloat = 32
+    private static var barEnd: CGFloat { width - pad - numberColumn - 12 }
 
-    private static func tag(_ s: String) -> NSAttributedString {
-        text(s.uppercased(), small, Palette.tertiaryText, tracking: 0.8)
+    // MARK: Layout + draw in one pass
+
+    /// Draws `s` with its cap height starting at `top`; returns the baseline.
+    @discardableResult
+    private func put(_ s: NSAttributedString, x: CGFloat, top: CGFloat, draw: Bool, width: CGFloat? = nil) -> CGFloat {
+        let font = s.attribute(.font, at: 0, effectiveRange: nil) as? NSFont ?? Self.childRow
+        let origin = NSPoint(x: x, y: top - (font.ascender - font.capHeight))
+        if draw {
+            if let width, s.size().width > width {
+                let style = NSMutableParagraphStyle()
+                style.lineBreakMode = .byTruncatingMiddle
+                let m = NSMutableAttributedString(attributedString: s)
+                m.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: m.length))
+                m.draw(with: NSRect(x: origin.x, y: origin.y, width: width, height: font.ascender - font.descender + 2),
+                       options: [.usesLineFragmentOrigin])
+            } else {
+                s.draw(at: origin)
+            }
+        }
+        return top + font.capHeight
     }
 
-    private static let title = NSFont.systemFont(ofSize: 15, weight: .semibold)
-    private static let body = mono(11)
-    private static let small = mono(10)
-    private static let label = mono(10, .medium)
-    private static let lineBody: CGFloat = 13
-    private static let lineSmall: CGFloat = 12
+    private func putRight(_ s: NSAttributedString, top: CGFloat, draw: Bool) -> CGFloat {
+        let w = s.size().width
+        put(s, x: Self.width - Self.pad - w, top: top, draw: draw)
+        return w
+    }
 
     /// Walks the model top to bottom. With `draw` false it only measures; returns total height.
     private func layout(draw: Bool) -> CGFloat {
-        let pad = Self.pad, right = Self.width - pad
+        let pad = Self.pad
         var y = pad
+        var first = true
+        func section() {
+            if !first { y += Self.sectionGap }
+            first = false
+        }
 
-        if draw { Self.text("Usage", Self.title, Palette.primaryText).draw(at: NSPoint(x: pad, y: y)) }
-        y += 18
-
-        for section in model.sections {
-            y += 18
-            let rightText = section.tag.map(Self.tag) ?? section.note.map { Self.text($0, Self.small, Palette.tertiaryText) }
-            row(y: y, draw: draw, left: Self.text(section.label, Self.label, Palette.secondaryText, tracking: 1.2), right: rightText)
-            y += Self.lineSmall
-            y = bars(section.bars, y: y, draw: draw)
-            for (index, account) in section.accounts.enumerated() {
-                y += 10
-                let name = NSMutableAttributedString()
-                name.append(Self.text(index == section.accounts.count - 1 ? "└ " : "├ ", Self.body, Palette.tertiaryText))
-                name.append(Self.text(account.name, Self.body, account.tag == nil ? Palette.primaryText : Palette.tertiaryText))
-                let rightText = account.tag.map(Self.tag) ?? account.note.map { Self.text($0, Self.small, Palette.tertiaryText) }
-                row(y: y, draw: draw, left: name, right: rightText, truncateLeft: true)
-                y += Self.lineBody
-                y = bars(account.bars, y: y, draw: draw)
+        if let pool = model.pool {
+            section()
+            y = self.pool(pool, top: y, draw: draw)
+        }
+        for (index, group) in model.groups.enumerated() {
+            section()
+            if index == 0 && model.pool != nil {
+                // Hairline: the pool above is the parent of everything below.
+                if draw {
+                    Palette.tertiaryText.withAlphaComponent(0.5).setFill()
+                    NSRect(x: pad, y: y, width: Self.width - 2 * pad, height: 1 / (window?.backingScaleFactor ?? 2)).fill()
+                }
+                y += Self.sectionGap
+            }
+            y = put(Self.caps(group.label, Palette.secondaryText), x: pad, top: y, draw: draw)
+            for row in group.rows {
+                y = child(row, top: y + Self.rowGap, draw: draw)
             }
         }
 
-        // Footer: status text, then settings, refresh and quit glyphs.
-        y += 18
+        // Footer: status text, then settings, refresh and quit glyphs centred on its caps.
+        section()
         let glyph: CGFloat = 14
-        quitRect = NSRect(x: right - glyph, y: y - 1, width: glyph, height: glyph)
+        let capHeight = Self.label.capHeight
+        quitRect = NSRect(x: Self.width - pad - glyph, y: y + capHeight / 2 - glyph / 2, width: glyph, height: glyph)
         refreshRect = quitRect.offsetBy(dx: -(glyph + 12), dy: 0)
         settingsRect = refreshRect.offsetBy(dx: -(glyph + 12), dy: 0)
         settingsButton.frame = settingsRect.insetBy(dx: -3, dy: -3)
         refreshButton.frame = refreshRect.insetBy(dx: -3, dy: -3)
         quitButton.frame = quitRect.insetBy(dx: -3, dy: -3)
         refreshButton.isEnabled = !model.refreshing
-        if draw {
-            Self.tag(model.footer).draw(at: NSPoint(x: pad, y: y))
+        // A long status ("LOGIN EXPIRED · UPDATED 3H AGO") wraps between its parts instead of meeting the glyphs.
+        let lines = wrap(model.footer.components(separatedBy: " · "), width: settingsRect.minX - 12 - pad) { Self.caps($0) }
+        for (index, line) in lines.enumerated() {
+            y = put(Self.caps(line), x: pad, top: index == 0 ? y : y + Self.lineGap, draw: draw)
         }
-        y += Self.lineSmall
-        return y + pad
+        return (y + pad).rounded(.up)
     }
 
-    /// Bar rows: label (≥28, widest label in group) · dithered bar · percent (34, right); then the reset line in tertiary.
-    private func bars(_ group: PopoverModel.Bars, y start: CGFloat, draw: Bool) -> CGFloat {
-        guard !group.bars.isEmpty else { return start }
-        let pad = Self.pad, right = Self.width - pad
-        var y = start + 6
-        let ctx = draw && group.stale ? NSGraphicsContext.current?.cgContext : nil
-        ctx?.saveGState()
-        ctx?.setAlpha(0.4)
-        defer { ctx?.restoreGState() }
-        let labelWidth = max(28, (group.bars.map { Self.text($0.label, Self.body, Palette.secondaryText).size().width }.max() ?? 0) + 8)
-        for (i, bar) in group.bars.enumerated() {
-            if i > 0 { y += 5 }
-            if draw {
-                Self.text(bar.label, Self.body, Palette.secondaryText).draw(at: NSPoint(x: pad, y: y))
-                let percent = Self.text(bar.percent, Self.body, Palette.primaryText)
-                percent.draw(at: NSPoint(x: right - percent.size().width, y: y))
-                let barRect = NSRect(x: pad + labelWidth, y: y + 3, width: right - 34 - 8 - (pad + labelWidth), height: 8)
-                Self.dither(barRect, fraction: bar.fraction, low: bar.low)
+    /// Greedy wrap of `parts` joined with " · ", breaking only between parts.
+    private func wrap(_ parts: [String], width: CGFloat, style: (String) -> NSAttributedString) -> [String] {
+        var lines: [String] = []
+        for part in parts {
+            if let last = lines.last, style(last + " · " + part).size().width <= width {
+                lines[lines.count - 1] = last + " · " + part
+            } else {
+                lines.append(part)
             }
-            y += Self.lineBody
         }
-        if let reset = group.reset {
-            y += 5
-            if draw { Self.text(reset, Self.small, Palette.tertiaryText).draw(at: NSPoint(x: pad, y: y)) }
-            y += Self.lineSmall
+        return lines
+    }
+
+    /// Hero NOW, caption, then WK/model bars with labels in a fixed column, then the pool's reset line.
+    private func pool(_ pool: PopoverModel.Pool, top: CGFloat, draw: Bool) -> CGFloat {
+        let pad = Self.pad
+        var y = put(Self.caps("Claude pool", Palette.secondaryText), x: pad, top: top, draw: draw)
+        y = put(Self.text(pool.hero, Self.hero, pool.low ? Palette.terracotta : Palette.primaryText), x: pad - 1, top: y + Self.rowGap, draw: draw)
+        y = put(Self.text(pool.caption, Self.childRow, Palette.secondaryText), x: pad, top: y + Self.lineGap + 4, draw: draw)
+        let labels = pool.bars.map { Self.text($0.label, Self.poolRow, Palette.secondaryText) }
+        let widest = labels.map { $0.size().width }.max() ?? 0
+        let barStart = pad + max(48, ((widest + 12) / 4).rounded(.up) * 4)
+        for (index, bar) in pool.bars.enumerated() {
+            let top = y + (index == 0 ? Self.rowGap + 4 : Self.rowGap - 4)
+            put(labels[index], x: pad, top: top, draw: draw)
+            _ = putRight(Self.text(bar.percent, Self.poolRow, Palette.primaryText), top: top, draw: draw)
+            let capHeight = Self.poolRow.capHeight
+            if draw {
+                Self.dither(NSRect(x: barStart, y: top + capHeight / 2 - Self.poolBarHeight / 2, width: Self.barEnd - barStart, height: Self.poolBarHeight),
+                            fraction: bar.fraction, low: bar.low)
+            }
+            y = top + capHeight
+        }
+        if let reset = pool.reset {
+            y = put(Self.text(reset, Self.childRow, Palette.tertiaryText), x: pad, top: y + Self.rowGap - 4, draw: draw)
         }
         return y
     }
 
-    /// Left text, optional right-aligned text; left is middle-truncated to fit when asked.
-    private func row(y: CGFloat, draw: Bool, left: NSAttributedString, right: NSAttributedString?, truncateLeft: Bool = false) {
-        guard draw else { return }
-        let pad = Self.pad, rightEdge = Self.width - pad
-        var available = rightEdge - pad
-        if let right {
-            let w = right.size().width
-            right.draw(at: NSPoint(x: rightEdge - w, y: y))
-            available -= w + 8
+    /// Name and NOW, a thin bar under the name, then the muted detail (or hint) wrapped between parts.
+    private func child(_ row: PopoverModel.Child, top: CGFloat, draw: Bool) -> CGFloat {
+        let x = Self.pad + Self.indent, right = Self.width - Self.pad
+        let ctx = draw ? NSGraphicsContext.current?.cgContext : nil
+        func dimmed(_ body: () -> Void) {
+            guard row.stale, let ctx else { return body() }
+            ctx.saveGState()
+            ctx.setAlpha(0.4)
+            body()
+            ctx.restoreGState()
         }
-        if truncateLeft, left.size().width > available {
-            let style = NSMutableParagraphStyle()
-            style.lineBreakMode = .byTruncatingMiddle
-            let m = NSMutableAttributedString(attributedString: left)
-            m.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: m.length))
-            m.draw(with: NSRect(x: pad, y: y, width: available, height: Self.lineBody + 4), options: [.usesLineFragmentOrigin])
-        } else {
-            left.draw(at: NSPoint(x: pad, y: y))
+
+        var rightWidth: CGFloat = 0
+        if let tag = row.tag {
+            rightWidth = putRight(Self.caps(tag), top: top, draw: draw)
+        } else if let percent = row.percent {
+            let s = Self.text(percent, Self.childRow, Palette.primaryText)
+            rightWidth = s.size().width
+            dimmed { _ = putRight(s, top: top, draw: draw) }
         }
+        let nameColor = row.tag == nil ? Palette.primaryText : Palette.tertiaryText
+        var y = put(Self.text(row.name, Self.childRow, nameColor), x: x, top: top, draw: draw,
+                    width: right - x - (rightWidth > 0 ? rightWidth + 12 : 0))
+        if row.tag == nil && row.percent != nil {
+            // Clear the name's descenders.
+            let barTop = y + Self.lineGap
+            dimmed {
+                if draw { Self.dither(NSRect(x: x, y: barTop, width: Self.barEnd - x, height: Self.childBarHeight), fraction: row.fraction, low: row.low) }
+            }
+            y = barTop + Self.childBarHeight
+        }
+        if let hint = row.hint {
+            y = put(Self.text(hint, Self.childRow, Palette.secondaryText), x: x, top: y + Self.lineGap, draw: draw, width: right - x)
+        } else if !row.detail.isEmpty {
+            // Wrap only between parts so metadata is never cut mid-word.
+            let lines = wrap(row.detail, width: right - x) { Self.text($0, Self.childRow, Palette.tertiaryText) }
+            dimmed {
+                for (index, line) in lines.enumerated() {
+                    y = put(Self.text(line, Self.childRow, Palette.tertiaryText), x: x, top: y + (index == 0 ? Self.lineGap : Self.lineGap), draw: draw)
+                }
+            }
+        }
+        return y
     }
 
     /// Stippled bar: dense checker for the filled part, sparse dots for the track. Static, no animation.
